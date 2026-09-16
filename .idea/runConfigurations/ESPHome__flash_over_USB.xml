@@ -1,0 +1,44 @@
+<component name="ProjectRunConfigurationManager">
+  <!--
+    Builds the firmware and flashes it over the cable, then attaches
+    the serial log viewer.
+
+    No explicit device is set on purpose, so ESPHome asks which port
+    to use each time.
+    The DevKitC-1 has TWO USB-C sockets and the choice matters:
+
+      UART port -> shows up as a Silicon Labs CP210x bridge. Use this.
+      USB port  -> shows up as a generic "USB Serial Device". This is
+                   the ESP32-S3's native port and is unreliable until
+                   working firmware is already on the board.
+
+    Hardcoding a port would break every time the board re-enumerates,
+    which is why the prompt is left in.
+
+    BEFORE FLASHING: disconnect the remote from the optocouplers.
+    GPIO states are undefined during boot and the garage can fire.
+  -->
+  <configuration default="false" name="ESPHome: flash over USB" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="false">
+    <module name="janus-gate" />
+    <option name="ENV_FILES" value="" />
+    <option name="INTERPRETER_OPTIONS" value="" />
+    <option name="PARENT_ENVS" value="true" />
+    <envs>
+      <env name="PYTHONUNBUFFERED" value="1" />
+    </envs>
+    <option name="SDK_HOME" value="" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="IS_MODULE_SDK" value="true" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+    <option name="SCRIPT_NAME" value="esphome" />
+    <option name="PARAMETERS" value="run janus-gate.yaml" />
+    <option name="SHOW_COMMAND_LINE" value="false" />
+    <option name="EMULATE_TERMINAL" value="true" />
+    <option name="MODULE_MODE" value="true" />
+    <option name="REDIRECT_INPUT" value="false" />
+    <option name="INPUT_FILE" value="" />
+    <method v="2" />
+  </configuration>
+</component>

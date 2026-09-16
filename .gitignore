@@ -16,5 +16,11 @@ venv/
 .DS_Store
 *.swp
 
-# IDE
-.idea/
+# IDE - JetBrains
+# Local workspace state stays out of the repo, but the shared run
+# configurations do not: .idea/runConfigurations holds the buttons
+# that flash and build this project, and they are worth sharing.
+# Note the '/*' - git cannot re-include anything below a directory
+# that is itself excluded, so '.idea/' would defeat the negation.
+.idea/*
+!.idea/runConfigurations/
