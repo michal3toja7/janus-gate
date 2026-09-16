@@ -1,14 +1,24 @@
 # =============================================================
 #  janus-gate  -  ESP32-S3 DevKitC-1 N16R8
-#  RF / Wi-Fi gate and garage controller
+#  RF / Wi-Fi controller for two independent drives
 # =============================================================
-#  Stage 3: four optocoupler channels driving the contacts of a
-#  3 V RF remote whose battery has been replaced by the ESP32 rail.
-#  Stage 6: physical ON-OFF-ON switch, works without Wi-Fi or HA.
+#  GARAGE  - driven by a 3 V RF remote whose battery has been
+#            replaced by the ESP32 rail. The ESP shorts the
+#            remote's own button contacts through optocouplers,
+#            so the gate still sees a remote it already knows.
+#            STATUS: working (stages 2, 3, 6).
+#
+#  GATE    - driven directly by a CC1101 433 MHz transceiver
+#            replaying the captured frame of a second remote.
+#            STATUS: not implemented yet (stage 5).
+#
+#  Both paths are fully local. Neither Wi-Fi nor Home Assistant
+#  is in the control chain - the physical switches work with the
+#  network down, which is the whole point of the device.
 #
 #  BEFORE EVERY FLASH:
 #  disconnect the remote from the optocouplers. GPIO states are
-#  undefined during boot and you can fire the gate by accident.
+#  undefined during boot and you can fire the garage by accident.
 #
 #  HARDWARE NOTE - OPTOCOUPLER JUMPERS:
 #  The per-channel jumpers on both PC817 modules must stay REMOVED.
@@ -20,13 +30,14 @@ substitutions:
   device_name: "janus-gate"
 
   # Pulse width for shorting the remote contacts.
-  # Start at 400ms. If the gate ignores it, raise to 600-800ms.
+  # 400ms works on this remote. Raise to 600-800ms if the drive
+  # starts ignoring commands.
   pulse: "400ms"
 
-  # How long the gate is ASSUMED to keep moving after a command.
-  # Real travel is about 30s; the extra margin is deliberate.
+  # How long the garage door is ASSUMED to keep moving after a
+  # command. Real travel is about 30s; the margin is deliberate.
   # Too long costs one wasted press. Too short makes the ESP think
-  # the gate is idle while it still moves, so the opposite command
+  # the door is idle while it still moves, so the opposite command
   # would reverse the drive under load instead of stopping it.
   travel_time: "45s"
 
@@ -78,8 +89,10 @@ web_server:
   port: 80
 
 # =============================================================
-#  WIRING MAP  -  remote 1 (3 V, four buttons)
+#  WIRING MAP
 # =============================================================
+#
+#  GARAGE  -  remote 1 (3 V, four buttons) via PC817
 #
 #  FUNCTION | GPIO | WIRE COLOUR | MODULE | CHANNEL
 #  ---------+------+-------------+--------+--------
@@ -95,30 +108,46 @@ web_server:
 #  collector to the pad measured at the higher potential,
 #  emitter to the lower one. The transistor side needs no ground.
 #
-#  PHYSICAL SWITCH 1  (ON-OFF-ON, momentary both ways)
-#  common -> GND, each position -> its own GPIO
-#  GPIO 15  up    -> cmd_open
-#  GPIO 16  down  -> cmd_close
+#  ---------------------------------------------------------------
+#  PHYSICAL SWITCHES  (ON-OFF-ON, momentary both ways, DPDT)
+#
+#  Six pins means two independent poles sharing one lever.
+#  Only one pole is used: centre pin to GND, the two outer pins
+#  to their GPIOs. The second pole stays unconnected.
+#  The centre OFF position is the resting state - nothing fires.
+#
+#  SWITCH | POSITION | GPIO | ACTION
+#  -------+----------+------+------------------------------------
+#  Garage | up       |  15  | cmd_garage_open
+#  Garage | down     |  16  | cmd_garage_close
+#  Gate   | up       |  17  | reserved - stage 5 (CC1101)
+#  Gate   | down     |  18  | reserved - stage 5 (CC1101)
+#
+#  ---------------------------------------------------------------
+#  CC1101 433 MHz  -  stage 5, not wired into the logic yet
+#
+#  CSN 10, MOSI 11, SCK 12, MISO 13, GDO0 9, GDO2 8
+#  VCC to 3.3 V - never 5 V. Antenna fitted before any transmit.
 # =============================================================
 
 # -------------------------------------------------------------
-#  ASSUMED GATE STATE
+#  ASSUMED GARAGE STATE
 # -------------------------------------------------------------
-#  The ESP has no feedback from the gate - it only knows what it
+#  The ESP has no feedback from the drive - it only knows what it
 #  sent itself. This is an assumption, not a measurement, and it
-#  can drift if someone uses the original remote or the gate
+#  can drift if someone uses the original remote or the door
 #  stalls on an obstacle.
 #
 #  The failure modes are asymmetric and that is what makes this
 #  worth doing: a stale "moving" state costs one extra press,
-#  because Stop on a stationary gate does nothing. A stale "idle"
+#  because Stop on a stationary door does nothing. A stale "idle"
 #  state simply behaves like no logic at all. There is no case
 #  that is worse than not having this feature.
 # -------------------------------------------------------------
 
 globals:
   # 0 = idle, 1 = opening, 2 = closing
-  - id: gate_dir
+  - id: garage_dir
     type: int
     restore_value: false
     initial_value: '0'
@@ -127,25 +156,25 @@ output:
   # Stop  -  grey wire  -  Opto 1, channel 2
   - platform: gpio
     pin: GPIO4
-    id: opto_stop
+    id: opto_garage_stop
 
   # Open  -  white wire  -  Opto 1, channel 1
   - platform: gpio
     pin: GPIO5
-    id: opto_open
+    id: opto_garage_open
 
   # Close  -  yellow wire  -  Opto 2, channel 1
   - platform: gpio
     pin: GPIO6
-    id: opto_close
+    id: opto_garage_close
 
   # Lock  -  orange wire  -  Opto 2, channel 2
   - platform: gpio
     pin: GPIO7
-    id: opto_lock
+    id: opto_garage_lock
 
 # =============================================================
-#  SCRIPTS
+#  SCRIPTS  -  garage
 # =============================================================
 #  send_*  are primitives: they only pulse an optocoupler.
 #  cmd_*   carry the direction logic and call the primitives.
@@ -156,96 +185,95 @@ output:
 script:
   # --- Primitives ---------------------------------------------
 
-  - id: send_open
+  - id: send_garage_open
     mode: single
     then:
-      - output.turn_on: opto_open
+      - output.turn_on: opto_garage_open
       - delay: ${pulse}
-      - output.turn_off: opto_open
+      - output.turn_off: opto_garage_open
 
-  - id: send_close
+  - id: send_garage_close
     mode: single
     then:
-      - output.turn_on: opto_close
+      - output.turn_on: opto_garage_close
       - delay: ${pulse}
-      - output.turn_off: opto_close
+      - output.turn_off: opto_garage_close
 
-  # Stop also clears the assumed state - the gate is standing
+  # Stop also clears the assumed state - the door is standing
   # still afterwards no matter what we believed before.
-  - id: send_stop
+  - id: send_garage_stop
     mode: single
     then:
-      - script.stop: travel_timer
-      - lambda: 'id(gate_dir) = 0;'
-      - output.turn_on: opto_stop
+      - script.stop: garage_travel_timer
+      - lambda: 'id(garage_dir) = 0;'
+      - output.turn_on: opto_garage_stop
       - delay: ${pulse}
-      - output.turn_off: opto_stop
+      - output.turn_off: opto_garage_stop
 
-  - id: send_lock
+  - id: send_garage_lock
     mode: single
     then:
-      - script.stop: travel_timer
-      - lambda: 'id(gate_dir) = 0;'
-      - output.turn_on: opto_lock
+      - script.stop: garage_travel_timer
+      - lambda: 'id(garage_dir) = 0;'
+      - output.turn_on: opto_garage_lock
       - delay: ${pulse}
-      - output.turn_off: opto_lock
+      - output.turn_off: opto_garage_lock
 
   # --- Assumed movement window --------------------------------
 
   # mode: restart - a new command restarts the countdown.
-  - id: travel_timer
+  - id: garage_travel_timer
     mode: restart
     then:
       - delay: ${travel_time}
-      - lambda: 'id(gate_dir) = 0;'
+      - lambda: 'id(garage_dir) = 0;'
 
   # --- Direction logic ----------------------------------------
 
   # Opposite direction while moving sends Stop instead.
-  # This gate controller reverses immediately on the opposite
-  # command, which is hard on the motor and gearbox under load,
-  # so inserting a Stop protects the mechanics as well as
-  # matching what the user actually meant.
+  # This drive reverses immediately on the opposite command,
+  # which is hard on the motor and gearbox under load, so
+  # inserting a Stop protects the mechanics as well as matching
+  # what the user actually meant.
   #
   # Pressing the SAME direction again just repeats the command
-  # and restarts the window. Harmless on this controller.
+  # and restarts the window. Harmless on this drive.
 
-  - id: cmd_open
+  - id: cmd_garage_open
     mode: single
     then:
       - if:
           condition:
-            lambda: 'return id(gate_dir) == 2;'
+            lambda: 'return id(garage_dir) == 2;'
           then:
-            - logger.log: "Closing in progress - sending Stop instead of Open"
-            - script.execute: send_stop
+            - logger.log: "Garage closing - sending Stop instead of Open"
+            - script.execute: send_garage_stop
           else:
-            - lambda: 'id(gate_dir) = 1;'
-            - script.execute: travel_timer
-            - script.execute: send_open
+            - lambda: 'id(garage_dir) = 1;'
+            - script.execute: garage_travel_timer
+            - script.execute: send_garage_open
 
-  - id: cmd_close
+  - id: cmd_garage_close
     mode: single
     then:
       - if:
           condition:
-            lambda: 'return id(gate_dir) == 1;'
+            lambda: 'return id(garage_dir) == 1;'
           then:
-            - logger.log: "Opening in progress - sending Stop instead of Close"
-            - script.execute: send_stop
+            - logger.log: "Garage opening - sending Stop instead of Close"
+            - script.execute: send_garage_stop
           else:
-            - lambda: 'id(gate_dir) = 2;'
-            - script.execute: travel_timer
-            - script.execute: send_close
+            - lambda: 'id(garage_dir) = 2;'
+            - script.execute: garage_travel_timer
+            - script.execute: send_garage_close
 
 # =============================================================
-#  PHYSICAL SWITCH  -  works with no Wi-Fi and no Home Assistant
-# =============================================================
-#  ON-OFF-ON momentary. Common pin to GND, each position to its
-#  own GPIO. Internal pullups, so no external resistors.
+#  PHYSICAL SWITCHES  -  work with no Wi-Fi and no Home Assistant
 # =============================================================
 
 binary_sensor:
+  # --- Garage switch - wired to the logic ---------------------
+
   - platform: gpio
     pin:
       number: GPIO15
@@ -253,13 +281,13 @@ binary_sensor:
         input: true
         pullup: true
       inverted: true
-    name: "Switch up"
-    id: sw_up
+    name: "Garage switch up"
+    id: sw_garage_up
     entity_category: diagnostic
     filters:
       - delayed_on: 30ms
     on_press:
-      - script.execute: cmd_open
+      - script.execute: cmd_garage_open
 
   - platform: gpio
     pin:
@@ -268,13 +296,45 @@ binary_sensor:
         input: true
         pullup: true
       inverted: true
-    name: "Switch down"
-    id: sw_down
+    name: "Garage switch down"
+    id: sw_garage_down
     entity_category: diagnostic
     filters:
       - delayed_on: 30ms
     on_press:
-      - script.execute: cmd_close
+      - script.execute: cmd_garage_close
+
+  # --- Gate switch - wired to GPIO, no action yet -------------
+  #
+  # No on_press until the CC1101 transmit path exists (stage 5).
+  # These entities exist so the wiring can be verified now:
+  # flip the lever and watch the state change in the web panel.
+
+  - platform: gpio
+    pin:
+      number: GPIO17
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Gate switch up"
+    id: sw_gate_up
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
+
+  - platform: gpio
+    pin:
+      number: GPIO18
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Gate switch down"
+    id: sw_gate_down
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
 
 # =============================================================
 #  BUTTONS
@@ -286,65 +346,64 @@ binary_sensor:
 
 button:
   - platform: template
-    name: "Open"
-    id: button_open
-    icon: "mdi:gate-open"
+    name: "Garage open"
+    id: button_garage_open
+    icon: "mdi:garage-open-variant"
     on_press:
-      - script.execute: cmd_open
+      - script.execute: cmd_garage_open
 
   - platform: template
-    name: "Close"
-    id: button_close
-    icon: "mdi:gate"
+    name: "Garage close"
+    id: button_garage_close
+    icon: "mdi:garage-variant"
     on_press:
-      - script.execute: cmd_close
+      - script.execute: cmd_garage_close
 
   - platform: template
-    name: "Stop"
-    id: button_stop
+    name: "Garage stop"
+    id: button_garage_stop
     icon: "mdi:stop-circle-outline"
     on_press:
-      - script.execute: send_stop
+      - script.execute: send_garage_stop
 
-  # CAUTION: on most gate remotes "Lock" disables the drive and
-  # can make the gate ignore every remote until it is unlocked.
-  # Consider hiding this entity or putting it behind a
-  # confirmation once Home Assistant is connected.
+  # CAUTION: on most drives "Lock" disables the motor and can make
+  # it ignore every remote until it is unlocked. Consider hiding
+  # this entity or putting it behind a confirmation in HA.
   - platform: template
-    name: "Lock"
-    id: button_lock
+    name: "Garage lock"
+    id: button_garage_lock
     icon: "mdi:lock-alert-outline"
     on_press:
-      - script.execute: send_lock
+      - script.execute: send_garage_lock
 
   # --- Raw pulses, no direction logic -------------------------
 
   - platform: template
-    name: "Open (direct)"
-    id: button_open_raw
+    name: "Garage open (direct)"
+    id: button_garage_open_raw
     icon: "mdi:flash-outline"
     entity_category: diagnostic
     on_press:
-      - script.execute: send_open
+      - script.execute: send_garage_open
 
   - platform: template
-    name: "Close (direct)"
-    id: button_close_raw
+    name: "Garage close (direct)"
+    id: button_garage_close_raw
     icon: "mdi:flash-outline"
     entity_category: diagnostic
     on_press:
-      - script.execute: send_close
+      - script.execute: send_garage_close
 
   # Forces the assumed state back to idle without touching the
-  # gate. Use when the ESP and reality have drifted apart.
+  # drive. Use when the ESP and reality have drifted apart.
   - platform: template
     name: "Reset assumed state"
     id: button_reset_state
     icon: "mdi:backup-restore"
     entity_category: diagnostic
     on_press:
-      - script.stop: travel_timer
-      - lambda: 'id(gate_dir) = 0;'
+      - script.stop: garage_travel_timer
+      - lambda: 'id(garage_dir) = 0;'
 
 # -------------------------------------------------------------
 #  DIAGNOSTICS
@@ -363,15 +422,15 @@ text_sensor:
     ip_address:
       name: "IP address"
 
-  # What the ESP believes the gate is doing. An assumption,
-  # not a measurement - see the note above.
+  # What the ESP believes the garage door is doing.
+  # An assumption, not a measurement - see the note above.
   - platform: template
-    name: "Assumed movement"
-    id: assumed_movement
-    icon: "mdi:gate-arrow-right"
+    name: "Garage assumed movement"
+    id: garage_assumed_movement
+    icon: "mdi:garage-alert-variant"
     update_interval: 1s
     lambda: |-
-      switch (id(gate_dir)) {
+      switch (id(garage_dir)) {
         case 1: return {"opening"};
         case 2: return {"closing"};
         default: return {"idle"};
@@ -382,7 +441,6 @@ text_sensor:
 # =============================================================
 #  Stage 5  CC1101:  CSN 10, MOSI 11, SCK 12, MISO 13,
 #                    GDO0 9, GDO2 8
-#  Stage 5  switch 2 (gate 2 via CC1101):  17, 18
 #  Stage 7  RFID reader:  14, 21, 42
 #
 #  Reserved in hardware / avoid:
