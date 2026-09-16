@@ -55,6 +55,8 @@ substitutions:
   # Most 433 MHz gate remotes sit here. A few use 433.42 MHz.
   # This CANNOT be changed without reflashing, so if learning
   # fails on site with no signal at all, suspect this first.
+  # Mitigation: build a 433.42 firmware too and keep the .bin on
+  # a phone - it can be flashed from the web panel on site.
   rf_frequency: "433.92MHz"
 
   # How many times a learned frame is repeated on transmit.
@@ -62,8 +64,9 @@ substitutions:
   # frame is often ignored by the receiver.
   rf_repeats: "8"
 
-  # How long learn mode stays armed before giving up.
-  learn_timeout: "30s"
+  # Learn mode needs TWO matching frames, so the window has to be
+  # long enough to hold the remote button down for a moment.
+  learn_timeout: "60s"
 
 esphome:
   name: ${device_name}
@@ -94,6 +97,10 @@ api:
 ota:
   - platform: esphome
     password: !secret ota_password
+  # Firmware upload straight from the web panel - no laptop and no
+  # ESPHome toolchain needed on site. Build the .bin at home, keep
+  # it on a phone, upload it through the browser if needed.
+  - platform: web_server
 
 wifi:
   ssid: !secret wifi_ssid
@@ -143,20 +150,31 @@ web_server:
 #  Gate   | down  |  18  | send_gate_close
 #
 #  ---------------------------------------------------------------
-#  CC1101 433 MHz
+#  CC1101 433 MHz  -  Ebyte E07-M1101D-SMA pinout
 #
-#  CC1101 | ESP32-S3 | NOTE
-#  -------+----------+-----------------------------------------
-#  VCC    |   3.3 V  | never 5 V
-#  GND    |   GND    |
-#  CSN    |  GPIO10  |
-#  MOSI   |  GPIO11  |
-#  SCK    |  GPIO12  |
-#  MISO   |  GPIO13  |
-#  GDO0   |  GPIO9   | transmit data
-#  GDO2   |  GPIO8   | receive data
+#  PIN | SIGNAL | ESP32-S3 | NOTE
+#  ----+--------+----------+----------------------------------
+#   1  | GND    |   GND    |
+#   2  | VCC    |   3.3 V  | never 5 V, own branch from the
+#      |        |          | DevKit 3V3 pin, not daisy-chained
+#      |        |          | behind the remote
+#   3  | GDO0   |  GPIO9   | transmit data
+#   4  | CSN    |  GPIO10  |
+#   5  | SCK    |  GPIO12  |
+#   6  | MOSI   |  GPIO11  |
+#   7  | MISO   |  GPIO13  |
+#   8  | GDO2   |  GPIO8   | receive data
+#   9  | GND    |    -     | optional extra ground
+#  10  | GND    |    -     | optional extra ground
 #
-#  Antenna must be fitted before power-up.
+#  NOTE: pins 7 and 8 are swapped relative to the common generic
+#  CC1101 breakout, which puts GDO2 on 7 and MISO on 8. Always
+#  check against the datasheet for the module in hand. Pin 1 is
+#  GND and has continuity with the SMA connector shell - that is
+#  the reliable way to orient the header.
+#
+#  100 nF + 47 uF across VCC and GND, as close to the header as
+#  possible. Antenna fitted before power-up.
 # =============================================================
 
 spi:
@@ -172,6 +190,11 @@ spi:
 #  the pad away from the RMT peripheral, which silently kills
 #  transmit - the chip enters TX but nothing reaches the air.
 #  Dual-pin wiring keeps TX on GDO0 and RX on GDO2 instead.
+#
+#  filter_bandwidth is at the minimum. An OOK receiver with AGC
+#  always hears something when no one is transmitting, and wider
+#  bandwidth simply lets in more noise power. 58 kHz is plenty
+#  for a fixed-code remote and keeps the noise floor down.
 # -------------------------------------------------------------
 
 cc1101:
@@ -183,47 +206,106 @@ cc1101:
   rx_attenuation: 0dB
   output_power: 10
 
+# -------------------------------------------------------------
+#  RECEIVER
+# -------------------------------------------------------------
+#  dump: raw rather than all. The "all" setting also runs the
+#  infrared decoders - Pronto and Beo4 in particular will happily
+#  "recognise" pure noise and bury the log in megabytes of hex.
+#  Raw replay does not need any decoder anyway.
+#
+#  filter: 250us discards short noise spikes. A real fixed-code
+#  remote uses pulses around 300-500 us, so nothing real is lost.
+# -------------------------------------------------------------
+
 remote_receiver:
   id: rf_rx
   pin: GPIO8
-  # dump: all also runs the built-in decoders. We do not rely on
-  # them - raw replay works for any OOK protocol - but if the
-  # remote IS recognised the log names it, which is useful.
-  dump: all
   filter: 100us
   idle: 6ms
   buffer_size: 10000b
   tolerance: 50%
   on_raw:
     then:
+      # ---------------------------------------------------------
+      #  TWO-FRAME CONFIRMATION
+      # ---------------------------------------------------------
+      #  A single frame is not trusted. The receiver picks up
+      #  background noise constantly, and noise can easily be long
+      #  enough to look like a code - so accepting the first frame
+      #  would mean storing junk before the remote is even pressed.
+      #
+      #  A real remote sends the same frame several times per
+      #  press. Noise never repeats. So the first usable frame is
+      #  only held as a candidate, and a code is stored only once
+      #  a second frame arrives that matches it within tolerance.
+      #
+      #  In practice: hold the remote button down for a moment
+      #  rather than tapping it.
+      # ---------------------------------------------------------
       - lambda: |-
           if (id(learn_target) == 0) return;
+
           size_t n = x.size();
-          if (n < 8) {
-            ESP_LOGW("learn", "Frame too short (%u) - ignored", (unsigned) n);
+          if (n < 24) {
+            ESP_LOGD("learn", "Too short: %u pulses", (unsigned) n);
             return;
           }
-          if (n > 128) n = 128;
+          if (n > 128) {
+            ESP_LOGW("learn", "Too long: %u pulses - frames may be merging", (unsigned) n);
+            return;
+          }
+
+          bool match = false;
+          if ((size_t) id(cand_len) == n) {
+            match = true;
+            for (size_t i = 0; i < n; i++) {
+              int32_t a = id(cand_code)[i];
+              int32_t b = x[i];
+              // Sign carries mark vs space - never mix them up.
+              if ((a < 0) != (b < 0)) { match = false; break; }
+              int32_t da = a < 0 ? -a : a;
+              int32_t db = b < 0 ? -b : b;
+              int32_t diff = da > db ? da - db : db - da;
+              // A quarter of the pulse width plus a flat 60 us.
+              // Loose enough for receiver jitter, tight enough
+              // that two different noise bursts never agree.
+              if (diff > da / 4 + 60) { match = false; break; }
+            }
+          }
+
+          if (!match) {
+            id(cand_len) = n;
+            for (size_t i = 0; i < n; i++) id(cand_code)[i] = x[i];
+            ESP_LOGD("learn", "Candidate: %u pulses - press again to confirm",
+                     (unsigned) n);
+            return;
+          }
 
           int32_t *dst = nullptr;
           const char *label = "";
           switch (id(learn_target)) {
-            case 1: dst = id(code_gate_open);  label = "OPEN";  break;
-            case 2: dst = id(code_gate_close); label = "CLOSE"; break;
-            case 3: dst = id(code_gate_stop);  label = "STOP";  break;
+            case 1: dst = id(code_gate_open);  label = "OPEN";
+                    id(len_gate_open)  = n; break;
+            case 2: dst = id(code_gate_close); label = "CLOSE";
+                    id(len_gate_close) = n; break;
+            case 3: dst = id(code_gate_stop);  label = "STOP";
+                    id(len_gate_stop)  = n; break;
             default: return;
           }
           for (size_t i = 0; i < n; i++) dst[i] = x[i];
 
-          switch (id(learn_target)) {
-            case 1: id(len_gate_open)  = n; break;
-            case 2: id(len_gate_close) = n; break;
-            case 3: id(len_gate_stop)  = n; break;
-          }
-
-          ESP_LOGI("learn", "Learned %s: %u pulses", label, (unsigned) n);
+          ESP_LOGI("learn", "CONFIRMED %s: %u pulses", label, (unsigned) n);
           id(learn_target) = 0;
-      - script.stop: learn_timeout_timer
+          id(cand_len) = 0;
+
+      # Only stops the window once the lambda above disarmed
+      # learn mode, i.e. after a confirmed capture.
+      - if:
+          condition:
+            lambda: 'return id(learn_target) == 0;'
+          then:
+            - script.stop: learn_timeout_timer
 
 remote_transmitter:
   id: rf_tx
@@ -256,6 +338,17 @@ globals:
   # --- Gate: learn mode target --------------------------------
   #  0 = off, 1 = open, 2 = close, 3 = stop
   - id: learn_target
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # --- Gate: candidate frame awaiting confirmation ------------
+  #  Deliberately NOT restored - a half-finished capture must
+  #  never survive a reboot.
+  - id: cand_code
+    type: int32_t[128]
+    restore_value: false
+  - id: cand_len
     type: int
     restore_value: false
     initial_value: '0'
@@ -460,11 +553,11 @@ script:
   # ---------------------------------------------------------
   #  GATE  -  learning
   # ---------------------------------------------------------
-  #  Arm a slot, press the original remote once, done. The first
-  #  usable frame is stored and learn mode disarms itself.
+  #  Arm a slot, then HOLD the matching button on the original
+  #  remote for a moment. Two matching frames are required before
+  #  anything is stored - see the note on the receiver above.
   #  Raw timings are stored rather than a decoded protocol, so
-  #  this works even for encodings the built-in decoders do not
-  #  recognise.
+  #  this works even for encodings no decoder recognises.
 
   - id: learn_timeout_timer
     mode: restart
@@ -472,8 +565,9 @@ script:
       - delay: ${learn_timeout}
       - lambda: |-
           if (id(learn_target) != 0) {
-            ESP_LOGW("learn", "Learn mode timed out - nothing captured");
+            ESP_LOGW("learn", "Learn mode timed out - nothing stored");
             id(learn_target) = 0;
+            id(cand_len) = 0;
           }
 
 binary_sensor:
@@ -619,17 +713,20 @@ button:
       - script.execute: send_gate_stop
 
   # --- Learning -----------------------------------------------
-  #  Press one of these, then press the matching button on the
-  #  original remote within ${learn_timeout}, holding it close to
-  #  the antenna. Watch "Learn mode" below for confirmation.
+  #  Press one of these, then HOLD the matching button on the
+  #  original remote close to the antenna. Watch "Learn mode":
+  #  it goes from "waiting" to "candidate held" to idle, and the
+  #  pulse count below shows what was stored.
 
   - platform: template
     name: "Learn gate open"
     id: button_learn_open
     icon: "mdi:school-outline"
     on_press:
-      - lambda: 'id(learn_target) = 1;'
-      - logger.log: "Learn mode ARMED for OPEN - press the remote now"
+      - lambda: |-
+          id(learn_target) = 1;
+          id(cand_len) = 0;
+      - logger.log: "Learn ARMED for OPEN - hold the remote button"
       - script.execute: learn_timeout_timer
 
   - platform: template
@@ -637,8 +734,10 @@ button:
     id: button_learn_close
     icon: "mdi:school-outline"
     on_press:
-      - lambda: 'id(learn_target) = 2;'
-      - logger.log: "Learn mode ARMED for CLOSE - press the remote now"
+      - lambda: |-
+          id(learn_target) = 2;
+          id(cand_len) = 0;
+      - logger.log: "Learn ARMED for CLOSE - hold the remote button"
       - script.execute: learn_timeout_timer
 
   - platform: template
@@ -646,8 +745,10 @@ button:
     id: button_learn_stop
     icon: "mdi:school-outline"
     on_press:
-      - lambda: 'id(learn_target) = 3;'
-      - logger.log: "Learn mode ARMED for STOP - press the remote now"
+      - lambda: |-
+          id(learn_target) = 3;
+          id(cand_len) = 0;
+      - logger.log: "Learn ARMED for STOP - hold the remote button"
       - script.execute: learn_timeout_timer
 
   - platform: template
@@ -656,7 +757,9 @@ button:
     icon: "mdi:close-circle-outline"
     entity_category: diagnostic
     on_press:
-      - lambda: 'id(learn_target) = 0;'
+      - lambda: |-
+          id(learn_target) = 0;
+          id(cand_len) = 0;
       - script.stop: learn_timeout_timer
       - logger.log: "Learn mode cancelled"
 
@@ -712,8 +815,8 @@ sensor:
     name: "Uptime"
 
   # Pulse counts of the stored frames. A plausible fixed-code
-  # frame lands somewhere around 25-100 pulses. A value of 2 or 4
-  # means noise was captured instead of the remote.
+  # frame lands somewhere around 25-100 pulses. This is the only
+  # way to tell a real capture from stored junk while on site.
   - platform: template
     name: "Gate open pulses"
     id: pulses_gate_open
@@ -737,6 +840,17 @@ sensor:
     accuracy_decimals: 0
     update_interval: 5s
     lambda: 'return id(len_gate_stop);'
+
+  # Live view of the frame waiting for confirmation. Useful on
+  # site: if this keeps jumping to different values, the receiver
+  # is chewing on noise rather than the remote.
+  - platform: template
+    name: "Candidate pulses"
+    id: pulses_candidate
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 1s
+    lambda: 'return id(cand_len);'
 
 text_sensor:
   - platform: wifi_info
@@ -763,12 +877,15 @@ text_sensor:
     icon: "mdi:school-outline"
     update_interval: 1s
     lambda: |-
+      if (id(learn_target) == 0) return {"idle"};
+      std::string what;
       switch (id(learn_target)) {
-        case 1: return {"waiting for OPEN"};
-        case 2: return {"waiting for CLOSE"};
-        case 3: return {"waiting for STOP"};
-        default: return {"idle"};
+        case 1: what = "OPEN";  break;
+        case 2: what = "CLOSE"; break;
+        case 3: what = "STOP";  break;
       }
+      if (id(cand_len) > 0) return {"candidate held - " + what};
+      return {"waiting for " + what};
 
 # =============================================================
 #  PINS RESERVED FOR LATER STAGES - DO NOT REUSE
