@@ -13,6 +13,8 @@
 #            the device itself. No code is baked into firmware.
 #            STATUS: implemented, codes not yet learned.
 #
+#  STAGE 9 (soldered onto perfboard) is done.
+#
 #  Both paths are fully local. Neither Wi-Fi nor Home Assistant
 #  is in the control chain - the physical switches work with the
 #  network down, which is the whole point of the device.
@@ -63,6 +65,12 @@ substitutions:
   # Original remotes send the same frame several times; a lone
   # frame is often ignored by the receiver.
   rf_repeats: "8"
+
+  # Assumed travel time for the gate. Unknown until measured on
+  # site - start generous and shorten once the real figure is
+  # known. Same asymmetry as the garage: too long costs a press,
+  # too short lets an opposite command reverse the drive.
+  gate_travel_time: "45s"
 
   # Learn mode needs TWO matching frames, so the window has to be
   # long enough to hold the remote button down for a moment.
@@ -146,8 +154,8 @@ web_server:
 #  -------+-------+------+----------------------------------------
 #  Garage | up    |  15  | cmd_garage_open
 #  Garage | down  |  16  | cmd_garage_close
-#  Gate   | up    |  17  | send_gate_open
-#  Gate   | down  |  18  | send_gate_close
+#  Gate   | up    |  17  | cmd_gate_open
+#  Gate   | down  |  18  | cmd_gate_close
 #
 #  ---------------------------------------------------------------
 #  CC1101 433 MHz  -  Ebyte E07-M1101D-SMA pinout
@@ -247,14 +255,7 @@ remote_receiver:
           if (id(learn_target) == 0) return;
 
           size_t n = x.size();
-          if (n < 24) {
-            ESP_LOGD("learn", "Too short: %u pulses", (unsigned) n);
-            return;
-          }
-          if (n > 128) {
-            ESP_LOGW("learn", "Too long: %u pulses - frames may be merging", (unsigned) n);
-            return;
-          }
+          if (n < 24 || n > 128) return;
 
           bool match = false;
           if ((size_t) id(cand_len) == n) {
@@ -331,6 +332,17 @@ globals:
   #  A stale "idle" state behaves like no logic at all.
   #  0 = idle, 1 = opening, 2 = closing
   - id: garage_dir
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # --- Gate: assumed movement ---------------------------------
+  #  Same reasoning as the garage above. Unlike the garage there
+  #  is a second failure mode: if the STOP code was never learned
+  #  there is nothing to send, so cmd_gate_* falls back to sending
+  #  the requested direction rather than doing nothing at all.
+  #  0 = idle, 1 = opening, 2 = closing
+  - id: gate_dir
     type: int
     restore_value: false
     initial_value: '0'
@@ -490,11 +502,9 @@ script:
   # ---------------------------------------------------------
   #  GATE  -  replay of learned frames
   # ---------------------------------------------------------
-  #  No direction logic here yet. The garage anti-reverse trick
-  #  exists because that drive reverses instantly on the opposite
-  #  command; this gate's behaviour is unknown until it is tested
-  #  on site. Add the same pattern later if it turns out to
-  #  behave the same way.
+  #  send_gate_* are the raw primitives - they key the radio and
+  #  nothing else. The anti-reverse logic lives in cmd_gate_*
+  #  below, mirroring the garage.
 
   - id: send_gate_open
     mode: single
@@ -541,6 +551,8 @@ script:
           then:
             - logger.log: "Gate STOP not learned yet - nothing sent"
           else:
+            - script.stop: gate_travel_timer
+            - lambda: 'id(gate_dir) = 0;'
             - remote_transmitter.transmit_raw:
                 code: !lambda |-
                   return std::vector<int32_t>(
@@ -549,6 +561,66 @@ script:
                 repeat:
                   times: ${rf_repeats}
                   wait_time: 10ms
+
+  # ---------------------------------------------------------
+  #  GATE  -  direction logic
+  # ---------------------------------------------------------
+  #  Mirrors the garage: the opposite direction while moving
+  #  sends Stop instead of reversing the drive under load.
+  #
+  #  IMPORTANT DIFFERENCE: the gate's Stop is a learned RF code,
+  #  not a hard-wired contact, so it may not exist. When it has
+  #  not been learned the fallback is to send the requested
+  #  direction anyway - doing nothing would be worse than the
+  #  reverse this logic is meant to prevent.
+
+  - id: gate_travel_timer
+    mode: restart
+    then:
+      - delay: ${gate_travel_time}
+      - lambda: 'id(gate_dir) = 0;'
+
+  - id: cmd_gate_open
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(gate_dir) == 2 && id(len_gate_stop) > 0;'
+          then:
+            - logger.log: "Gate closing - sending Stop instead of Open"
+            - script.stop: gate_travel_timer
+            - lambda: 'id(gate_dir) = 0;'
+            - script.execute: send_gate_stop
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(gate_dir) == 2;'
+                then:
+                  - logger.log: "Gate closing but no Stop code learned - sending Open anyway"
+            - lambda: 'id(gate_dir) = 1;'
+            - script.execute: gate_travel_timer
+            - script.execute: send_gate_open
+
+  - id: cmd_gate_close
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(gate_dir) == 1 && id(len_gate_stop) > 0;'
+          then:
+            - logger.log: "Gate opening - sending Stop instead of Close"
+            - script.stop: gate_travel_timer
+            - lambda: 'id(gate_dir) = 0;'
+            - script.execute: send_gate_stop
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(gate_dir) == 1;'
+                then:
+                  - logger.log: "Gate opening but no Stop code learned - sending Close anyway"
+            - lambda: 'id(gate_dir) = 2;'
+            - script.execute: gate_travel_timer
+            - script.execute: send_gate_close
 
   # ---------------------------------------------------------
   #  GATE  -  learning
@@ -618,7 +690,7 @@ binary_sensor:
     filters:
       - delayed_on: 30ms
     on_press:
-      - script.execute: send_gate_open
+      - script.execute: cmd_gate_open
 
   - platform: gpio
     pin:
@@ -633,7 +705,7 @@ binary_sensor:
     filters:
       - delayed_on: 30ms
     on_press:
-      - script.execute: send_gate_close
+      - script.execute: cmd_gate_close
 
   # --- Learned code presence ----------------------------------
 
@@ -696,14 +768,14 @@ button:
     id: button_gate_open
     icon: "mdi:gate-open"
     on_press:
-      - script.execute: send_gate_open
+      - script.execute: cmd_gate_open
 
   - platform: template
     name: "Gate close"
     id: button_gate_close
     icon: "mdi:gate"
     on_press:
-      - script.execute: send_gate_close
+      - script.execute: cmd_gate_close
 
   - platform: template
     name: "Gate stop"
@@ -795,8 +867,24 @@ button:
     on_press:
       - script.execute: send_garage_close
 
-  # Forces the assumed garage state back to idle without touching
-  # the drive. Use when the ESP and reality have drifted apart.
+  - platform: template
+    name: "Gate open (direct)"
+    id: button_gate_open_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_gate_open
+
+  - platform: template
+    name: "Gate close (direct)"
+    id: button_gate_close_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_gate_close
+
+  # Forces both assumed states back to idle without touching
+  # either drive. Use when the ESP and reality have drifted apart.
   - platform: template
     name: "Reset assumed state"
     id: button_reset_state
@@ -804,7 +892,10 @@ button:
     entity_category: diagnostic
     on_press:
       - script.stop: garage_travel_timer
-      - lambda: 'id(garage_dir) = 0;'
+      - script.stop: gate_travel_timer
+      - lambda: |-
+          id(garage_dir) = 0;
+          id(gate_dir) = 0;
 
 sensor:
   - platform: wifi_signal
@@ -866,6 +957,18 @@ text_sensor:
     update_interval: 1s
     lambda: |-
       switch (id(garage_dir)) {
+        case 1: return {"opening"};
+        case 2: return {"closing"};
+        default: return {"idle"};
+      }
+
+  - platform: template
+    name: "Gate assumed movement"
+    id: gate_assumed_movement
+    icon: "mdi:gate-arrow-right"
+    update_interval: 1s
+    lambda: |-
+      switch (id(gate_dir)) {
         case 1: return {"opening"};
         case 2: return {"closing"};
         default: return {"idle"};
