@@ -5,12 +5,13 @@
 #  GARAGE  - driven by a 3 V RF remote whose battery has been
 #            replaced by the ESP32 rail. The ESP shorts the
 #            remote's own button contacts through optocouplers,
-#            so the gate still sees a remote it already knows.
+#            so the drive still sees a remote it already knows.
 #            STATUS: working (stages 2, 3, 6).
 #
-#  GATE    - driven directly by a CC1101 433 MHz transceiver
-#            replaying the captured frame of a second remote.
-#            STATUS: not implemented yet (stage 5).
+#  GATE    - driven by a CC1101 433 MHz transceiver replaying a
+#            raw OOK frame LEARNED FROM THE ORIGINAL REMOTE on
+#            the device itself. No code is baked into firmware.
+#            STATUS: implemented, codes not yet learned.
 #
 #  Both paths are fully local. Neither Wi-Fi nor Home Assistant
 #  is in the control chain - the physical switches work with the
@@ -24,10 +25,18 @@
 #  The per-channel jumpers on both PC817 modules must stay REMOVED.
 #  With the jumpers fitted the channels are permanently triggered,
 #  which holds a remote button down and locks up the encoder.
+#
+#  HARDWARE NOTE - TOGGLE LEVER INVERSION:
+#  A toggle lever pivots, so pushing it UP closes the contact on
+#  the LOWER side of the body. The GPIO assignments below are by
+#  LEVER POSITION as the user experiences it, which is the
+#  opposite of the terminal position on the switch body.
 # =============================================================
 
 substitutions:
   device_name: "janus-gate"
+
+  # --- Garage (optocoupler path) ------------------------------
 
   # Pulse width for shorting the remote contacts.
   # 400ms works on this remote. Raise to 600-800ms if the drive
@@ -40,6 +49,21 @@ substitutions:
   # the door is idle while it still moves, so the opposite command
   # would reverse the drive under load instead of stopping it.
   travel_time: "45s"
+
+  # --- Gate (CC1101 path) -------------------------------------
+
+  # Most 433 MHz gate remotes sit here. A few use 433.42 MHz.
+  # This CANNOT be changed without reflashing, so if learning
+  # fails on site with no signal at all, suspect this first.
+  rf_frequency: "433.92MHz"
+
+  # How many times a learned frame is repeated on transmit.
+  # Original remotes send the same frame several times; a lone
+  # frame is often ignored by the receiver.
+  rf_repeats: "8"
+
+  # How long learn mode stays armed before giving up.
+  learn_timeout: "30s"
 
 esphome:
   name: ${device_name}
@@ -75,16 +99,16 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
-  # Fallback access point in case the credentials are wrong.
-  # Connect to it with a phone and fix the config from there.
+  # THIS IS THE ON-SITE ACCESS PATH.
+  # Away from the home network the ESP serves its own AP. Join it
+  # with a phone and browse to 192.168.4.1 to reach the panel and
+  # run the learning procedure. Test this before going on site.
   ap:
     ssid: "Janus Gate Fallback"
     password: !secret fallback_password
 
 captive_portal:
 
-# Test panel served at the device IP.
-# Works without Home Assistant - this is the bench test interface.
 web_server:
   port: 80
 
@@ -103,53 +127,162 @@ web_server:
 #
 #  GPIO -> IN+ on the PC817 module
 #  GND  -> IN- on the PC817 module
-#
-#  The transistor side goes to the remote's button contacts:
-#  collector to the pad measured at the higher potential,
-#  emitter to the lower one. The transistor side needs no ground.
+#  Transistor side to the remote contacts: collector to the pad
+#  at the higher potential, emitter to the lower. No ground.
 #
 #  ---------------------------------------------------------------
-#  PHYSICAL SWITCHES  (ON-OFF-ON, momentary both ways, DPDT)
+#  PHYSICAL SWITCHES  (ON-OFF-ON momentary, DPDT - one pole used)
+#  Centre pin to GND, the two outer pins to their GPIOs.
+#  See the lever inversion note in the header.
 #
-#  Six pins means two independent poles sharing one lever.
-#  Only one pole is used: centre pin to GND, the two outer pins
-#  to their GPIOs. The second pole stays unconnected.
-#  The centre OFF position is the resting state - nothing fires.
-#
-#  SWITCH | POSITION | GPIO | ACTION
-#  -------+----------+------+------------------------------------
-#  Garage | up       |  15  | cmd_garage_open
-#  Garage | down     |  16  | cmd_garage_close
-#  Gate   | up       |  17  | reserved - stage 5 (CC1101)
-#  Gate   | down     |  18  | reserved - stage 5 (CC1101)
+#  SWITCH | LEVER | GPIO | ACTION
+#  -------+-------+------+----------------------------------------
+#  Garage | up    |  15  | cmd_garage_open
+#  Garage | down  |  16  | cmd_garage_close
+#  Gate   | up    |  17  | send_gate_open
+#  Gate   | down  |  18  | send_gate_close
 #
 #  ---------------------------------------------------------------
-#  CC1101 433 MHz  -  stage 5, not wired into the logic yet
+#  CC1101 433 MHz
 #
-#  CSN 10, MOSI 11, SCK 12, MISO 13, GDO0 9, GDO2 8
-#  VCC to 3.3 V - never 5 V. Antenna fitted before any transmit.
+#  CC1101 | ESP32-S3 | NOTE
+#  -------+----------+-----------------------------------------
+#  VCC    |   3.3 V  | never 5 V
+#  GND    |   GND    |
+#  CSN    |  GPIO10  |
+#  MOSI   |  GPIO11  |
+#  SCK    |  GPIO12  |
+#  MISO   |  GPIO13  |
+#  GDO0   |  GPIO9   | transmit data
+#  GDO2   |  GPIO8   | receive data
+#
+#  Antenna must be fitted before power-up.
 # =============================================================
 
+spi:
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+
 # -------------------------------------------------------------
-#  ASSUMED GARAGE STATE
+#  CC1101 radio front end
 # -------------------------------------------------------------
-#  The ESP has no feedback from the drive - it only knows what it
-#  sent itself. This is an assumption, not a measurement, and it
-#  can drift if someone uses the original remote or the door
-#  stalls on an obstacle.
-#
-#  The failure modes are asymmetric and that is what makes this
-#  worth doing: a stale "moving" state costs one extra press,
-#  because Stop on a stationary door does nothing. A stale "idle"
-#  state simply behaves like no logic at all. There is no case
-#  that is worse than not having this feature.
+#  gdo0_pin is deliberately NOT set in this block. It is only
+#  used for the FIFO-mode RX interrupt, and setting it re-routes
+#  the pad away from the RMT peripheral, which silently kills
+#  transmit - the chip enters TX but nothing reaches the air.
+#  Dual-pin wiring keeps TX on GDO0 and RX on GDO2 instead.
 # -------------------------------------------------------------
 
+cc1101:
+  id: radio
+  cs_pin: GPIO10
+  frequency: ${rf_frequency}
+  modulation_type: ASK/OOK
+  filter_bandwidth: 200kHz
+  rx_attenuation: 0dB
+  output_power: 10
+
+remote_receiver:
+  id: rf_rx
+  pin: GPIO8
+  # dump: all also runs the built-in decoders. We do not rely on
+  # them - raw replay works for any OOK protocol - but if the
+  # remote IS recognised the log names it, which is useful.
+  dump: all
+  filter: 100us
+  idle: 6ms
+  buffer_size: 10000b
+  tolerance: 50%
+  on_raw:
+    then:
+      - lambda: |-
+          if (id(learn_target) == 0) return;
+          size_t n = x.size();
+          if (n < 8) {
+            ESP_LOGW("learn", "Frame too short (%u) - ignored", (unsigned) n);
+            return;
+          }
+          if (n > 128) n = 128;
+
+          int32_t *dst = nullptr;
+          const char *label = "";
+          switch (id(learn_target)) {
+            case 1: dst = id(code_gate_open);  label = "OPEN";  break;
+            case 2: dst = id(code_gate_close); label = "CLOSE"; break;
+            case 3: dst = id(code_gate_stop);  label = "STOP";  break;
+            default: return;
+          }
+          for (size_t i = 0; i < n; i++) dst[i] = x[i];
+
+          switch (id(learn_target)) {
+            case 1: id(len_gate_open)  = n; break;
+            case 2: id(len_gate_close) = n; break;
+            case 3: id(len_gate_stop)  = n; break;
+          }
+
+          ESP_LOGI("learn", "Learned %s: %u pulses", label, (unsigned) n);
+          id(learn_target) = 0;
+      - script.stop: learn_timeout_timer
+
+remote_transmitter:
+  id: rf_tx
+  pin: GPIO9
+  # OOK has no sub-carrier - the RF carrier is simply keyed on
+  # and off, so the data line must be driven solid, not chopped.
+  carrier_duty_percent: 100%
+
+# =============================================================
+#  STATE
+# =============================================================
+#  Learned frames live in NVS and survive a reboot, so the codes
+#  are captured once on site and never again. 128 pulses is
+#  comfortably more than a 24-bit fixed-code frame needs.
+# =============================================================
+
 globals:
-  # 0 = idle, 1 = opening, 2 = closing
+  # --- Garage: assumed movement -------------------------------
+  #  The ESP has no feedback from the drive - it only knows what
+  #  it sent itself. The failure modes are asymmetric and that is
+  #  what makes this worth doing: a stale "moving" state costs one
+  #  extra press, because Stop on a stationary door does nothing.
+  #  A stale "idle" state behaves like no logic at all.
+  #  0 = idle, 1 = opening, 2 = closing
   - id: garage_dir
     type: int
     restore_value: false
+    initial_value: '0'
+
+  # --- Gate: learn mode target --------------------------------
+  #  0 = off, 1 = open, 2 = close, 3 = stop
+  - id: learn_target
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # --- Gate: learned frames -----------------------------------
+  - id: code_gate_open
+    type: int32_t[128]
+    restore_value: true
+  - id: len_gate_open
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: code_gate_close
+    type: int32_t[128]
+    restore_value: true
+  - id: len_gate_close
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: code_gate_stop
+    type: int32_t[128]
+    restore_value: true
+  - id: len_gate_stop
+    type: int
+    restore_value: true
     initial_value: '0'
 
 output:
@@ -174,16 +307,18 @@ output:
     id: opto_garage_lock
 
 # =============================================================
-#  SCRIPTS  -  garage
+#  SCRIPTS
 # =============================================================
-#  send_*  are primitives: they only pulse an optocoupler.
-#  cmd_*   carry the direction logic and call the primitives.
+#  send_*  are primitives: they pulse an optocoupler or key the
+#          radio. cmd_* carry logic and call the primitives.
 #  Keeping them separate avoids recursion and leaves the raw
-#  pulses reachable for debugging.
+#  actions reachable for debugging.
 # =============================================================
 
 script:
-  # --- Primitives ---------------------------------------------
+  # ---------------------------------------------------------
+  #  GARAGE
+  # ---------------------------------------------------------
 
   - id: send_garage_open
     mode: single
@@ -219,8 +354,6 @@ script:
       - delay: ${pulse}
       - output.turn_off: opto_garage_lock
 
-  # --- Assumed movement window --------------------------------
-
   # mode: restart - a new command restarts the countdown.
   - id: garage_travel_timer
     mode: restart
@@ -228,17 +361,11 @@ script:
       - delay: ${travel_time}
       - lambda: 'id(garage_dir) = 0;'
 
-  # --- Direction logic ----------------------------------------
-
-  # Opposite direction while moving sends Stop instead.
-  # This drive reverses immediately on the opposite command,
-  # which is hard on the motor and gearbox under load, so
-  # inserting a Stop protects the mechanics as well as matching
-  # what the user actually meant.
-  #
-  # Pressing the SAME direction again just repeats the command
-  # and restarts the window. Harmless on this drive.
-
+  # Opposite direction while moving sends Stop instead. This
+  # drive reverses immediately on the opposite command, which is
+  # hard on the motor and gearbox under load, so inserting a Stop
+  # protects the mechanics as well as matching intent.
+  # Pressing the SAME direction again just repeats the command.
   - id: cmd_garage_open
     mode: single
     then:
@@ -267,12 +394,90 @@ script:
             - script.execute: garage_travel_timer
             - script.execute: send_garage_close
 
-# =============================================================
-#  PHYSICAL SWITCHES  -  work with no Wi-Fi and no Home Assistant
-# =============================================================
+  # ---------------------------------------------------------
+  #  GATE  -  replay of learned frames
+  # ---------------------------------------------------------
+  #  No direction logic here yet. The garage anti-reverse trick
+  #  exists because that drive reverses instantly on the opposite
+  #  command; this gate's behaviour is unknown until it is tested
+  #  on site. Add the same pattern later if it turns out to
+  #  behave the same way.
+
+  - id: send_gate_open
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(len_gate_open) == 0;'
+          then:
+            - logger.log: "Gate OPEN not learned yet - nothing sent"
+          else:
+            - remote_transmitter.transmit_raw:
+                code: !lambda |-
+                  return std::vector<int32_t>(
+                    id(code_gate_open),
+                    id(code_gate_open) + id(len_gate_open));
+                repeat:
+                  times: ${rf_repeats}
+                  wait_time: 10ms
+
+  - id: send_gate_close
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(len_gate_close) == 0;'
+          then:
+            - logger.log: "Gate CLOSE not learned yet - nothing sent"
+          else:
+            - remote_transmitter.transmit_raw:
+                code: !lambda |-
+                  return std::vector<int32_t>(
+                    id(code_gate_close),
+                    id(code_gate_close) + id(len_gate_close));
+                repeat:
+                  times: ${rf_repeats}
+                  wait_time: 10ms
+
+  - id: send_gate_stop
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(len_gate_stop) == 0;'
+          then:
+            - logger.log: "Gate STOP not learned yet - nothing sent"
+          else:
+            - remote_transmitter.transmit_raw:
+                code: !lambda |-
+                  return std::vector<int32_t>(
+                    id(code_gate_stop),
+                    id(code_gate_stop) + id(len_gate_stop));
+                repeat:
+                  times: ${rf_repeats}
+                  wait_time: 10ms
+
+  # ---------------------------------------------------------
+  #  GATE  -  learning
+  # ---------------------------------------------------------
+  #  Arm a slot, press the original remote once, done. The first
+  #  usable frame is stored and learn mode disarms itself.
+  #  Raw timings are stored rather than a decoded protocol, so
+  #  this works even for encodings the built-in decoders do not
+  #  recognise.
+
+  - id: learn_timeout_timer
+    mode: restart
+    then:
+      - delay: ${learn_timeout}
+      - lambda: |-
+          if (id(learn_target) != 0) {
+            ESP_LOGW("learn", "Learn mode timed out - nothing captured");
+            id(learn_target) = 0;
+          }
 
 binary_sensor:
-  # --- Garage switch - wired to the logic ---------------------
+  # --- Garage switch ------------------------------------------
 
   - platform: gpio
     pin:
@@ -304,11 +509,7 @@ binary_sensor:
     on_press:
       - script.execute: cmd_garage_close
 
-  # --- Gate switch - wired to GPIO, no action yet -------------
-  #
-  # No on_press until the CC1101 transmit path exists (stage 5).
-  # These entities exist so the wiring can be verified now:
-  # flip the lever and watch the state change in the web panel.
+  # --- Gate switch --------------------------------------------
 
   - platform: gpio
     pin:
@@ -322,6 +523,8 @@ binary_sensor:
     entity_category: diagnostic
     filters:
       - delayed_on: 30ms
+    on_press:
+      - script.execute: send_gate_open
 
   - platform: gpio
     pin:
@@ -335,16 +538,32 @@ binary_sensor:
     entity_category: diagnostic
     filters:
       - delayed_on: 30ms
+    on_press:
+      - script.execute: send_gate_close
 
-# =============================================================
-#  BUTTONS
-# =============================================================
-#  Primary controls go through the direction logic.
-#  The (direct) ones bypass it and pulse the optocoupler raw -
-#  useful when the state machine and reality disagree.
-# =============================================================
+  # --- Learned code presence ----------------------------------
+
+  - platform: template
+    name: "Gate open learned"
+    id: has_gate_open
+    entity_category: diagnostic
+    lambda: 'return id(len_gate_open) > 0;'
+
+  - platform: template
+    name: "Gate close learned"
+    id: has_gate_close
+    entity_category: diagnostic
+    lambda: 'return id(len_gate_close) > 0;'
+
+  - platform: template
+    name: "Gate stop learned"
+    id: has_gate_stop
+    entity_category: diagnostic
+    lambda: 'return id(len_gate_stop) > 0;'
 
 button:
+  # --- Garage -------------------------------------------------
+
   - platform: template
     name: "Garage open"
     id: button_garage_open
@@ -376,7 +595,86 @@ button:
     on_press:
       - script.execute: send_garage_lock
 
-  # --- Raw pulses, no direction logic -------------------------
+  # --- Gate ---------------------------------------------------
+
+  - platform: template
+    name: "Gate open"
+    id: button_gate_open
+    icon: "mdi:gate-open"
+    on_press:
+      - script.execute: send_gate_open
+
+  - platform: template
+    name: "Gate close"
+    id: button_gate_close
+    icon: "mdi:gate"
+    on_press:
+      - script.execute: send_gate_close
+
+  - platform: template
+    name: "Gate stop"
+    id: button_gate_stop
+    icon: "mdi:stop-circle-outline"
+    on_press:
+      - script.execute: send_gate_stop
+
+  # --- Learning -----------------------------------------------
+  #  Press one of these, then press the matching button on the
+  #  original remote within ${learn_timeout}, holding it close to
+  #  the antenna. Watch "Learn mode" below for confirmation.
+
+  - platform: template
+    name: "Learn gate open"
+    id: button_learn_open
+    icon: "mdi:school-outline"
+    on_press:
+      - lambda: 'id(learn_target) = 1;'
+      - logger.log: "Learn mode ARMED for OPEN - press the remote now"
+      - script.execute: learn_timeout_timer
+
+  - platform: template
+    name: "Learn gate close"
+    id: button_learn_close
+    icon: "mdi:school-outline"
+    on_press:
+      - lambda: 'id(learn_target) = 2;'
+      - logger.log: "Learn mode ARMED for CLOSE - press the remote now"
+      - script.execute: learn_timeout_timer
+
+  - platform: template
+    name: "Learn gate stop"
+    id: button_learn_stop
+    icon: "mdi:school-outline"
+    on_press:
+      - lambda: 'id(learn_target) = 3;'
+      - logger.log: "Learn mode ARMED for STOP - press the remote now"
+      - script.execute: learn_timeout_timer
+
+  - platform: template
+    name: "Cancel learning"
+    id: button_learn_cancel
+    icon: "mdi:close-circle-outline"
+    entity_category: diagnostic
+    on_press:
+      - lambda: 'id(learn_target) = 0;'
+      - script.stop: learn_timeout_timer
+      - logger.log: "Learn mode cancelled"
+
+  # Wipes all three learned frames. There is no undo - the codes
+  # have to be learned from the original remote again.
+  - platform: template
+    name: "Forget all gate codes"
+    id: button_forget_all
+    icon: "mdi:delete-forever-outline"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(len_gate_open) = 0;
+          id(len_gate_close) = 0;
+          id(len_gate_stop) = 0;
+          ESP_LOGW("learn", "All gate codes erased");
+
+  # --- Diagnostics --------------------------------------------
 
   - platform: template
     name: "Garage open (direct)"
@@ -394,8 +692,8 @@ button:
     on_press:
       - script.execute: send_garage_close
 
-  # Forces the assumed state back to idle without touching the
-  # drive. Use when the ESP and reality have drifted apart.
+  # Forces the assumed garage state back to idle without touching
+  # the drive. Use when the ESP and reality have drifted apart.
   - platform: template
     name: "Reset assumed state"
     id: button_reset_state
@@ -405,10 +703,6 @@ button:
       - script.stop: garage_travel_timer
       - lambda: 'id(garage_dir) = 0;'
 
-# -------------------------------------------------------------
-#  DIAGNOSTICS
-# -------------------------------------------------------------
-
 sensor:
   - platform: wifi_signal
     name: "Wi-Fi signal"
@@ -416,6 +710,33 @@ sensor:
 
   - platform: uptime
     name: "Uptime"
+
+  # Pulse counts of the stored frames. A plausible fixed-code
+  # frame lands somewhere around 25-100 pulses. A value of 2 or 4
+  # means noise was captured instead of the remote.
+  - platform: template
+    name: "Gate open pulses"
+    id: pulses_gate_open
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: 'return id(len_gate_open);'
+
+  - platform: template
+    name: "Gate close pulses"
+    id: pulses_gate_close
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: 'return id(len_gate_close);'
+
+  - platform: template
+    name: "Gate stop pulses"
+    id: pulses_gate_stop
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: 'return id(len_gate_stop);'
 
 text_sensor:
   - platform: wifi_info
@@ -436,11 +757,22 @@ text_sensor:
         default: return {"idle"};
       }
 
+  - platform: template
+    name: "Learn mode"
+    id: learn_mode_state
+    icon: "mdi:school-outline"
+    update_interval: 1s
+    lambda: |-
+      switch (id(learn_target)) {
+        case 1: return {"waiting for OPEN"};
+        case 2: return {"waiting for CLOSE"};
+        case 3: return {"waiting for STOP"};
+        default: return {"idle"};
+      }
+
 # =============================================================
 #  PINS RESERVED FOR LATER STAGES - DO NOT REUSE
 # =============================================================
-#  Stage 5  CC1101:  CSN 10, MOSI 11, SCK 12, MISO 13,
-#                    GDO0 9, GDO2 8
 #  Stage 7  RFID reader:  14, 21, 42
 #
 #  Reserved in hardware / avoid:
