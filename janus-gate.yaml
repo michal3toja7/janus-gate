@@ -8,6 +8,11 @@
 #  BEFORE EVERY FLASH:
 #  disconnect the remote from the optocouplers. GPIO states are
 #  undefined during boot and you can fire the gate by accident.
+#
+#  HARDWARE NOTE - OPTOCOUPLER JUMPERS:
+#  The per-channel jumpers on both PC817 modules must stay REMOVED.
+#  With the jumpers fitted the channels are permanently triggered,
+#  which holds a remote button down and locks up the encoder.
 # =============================================================
 
 substitutions:
@@ -63,33 +68,45 @@ captive_portal:
 web_server:
   port: 80
 
-# -------------------------------------------------------------
-#  OUTPUTS  ->  LED side of the PC817 optocouplers
-# -------------------------------------------------------------
+# =============================================================
+#  WIRING MAP  -  remote 1 (3 V, four buttons)
+# =============================================================
+#
+#  FUNCTION | GPIO | WIRE COLOUR | MODULE | CHANNEL
+#  ---------+------+-------------+--------+--------
+#  Stop     |   4  | grey        | Opto 1 |    2
+#  Open     |   5  | white       | Opto 1 |    1
+#  Close    |   6  | yellow      | Opto 2 |    1
+#  Lock     |   7  | orange      | Opto 2 |    2
+#
 #  GPIO -> IN+ on the PC817 module
 #  GND  -> IN- on the PC817 module
 #
 #  The transistor side goes to the remote's button contacts:
 #  collector to the pad measured at the higher potential,
 #  emitter to the lower one. The transistor side needs no ground.
-# -------------------------------------------------------------
+# =============================================================
 
 output:
+  # Stop  -  grey wire  -  Opto 1, channel 2
   - platform: gpio
     pin: GPIO4
-    id: opto_1
+    id: opto_stop
 
+  # Open  -  white wire  -  Opto 1, channel 1
   - platform: gpio
     pin: GPIO5
-    id: opto_2
+    id: opto_open
 
+  # Close  -  yellow wire  -  Opto 2, channel 1
   - platform: gpio
     pin: GPIO6
-    id: opto_3
+    id: opto_close
 
+  # Lock  -  orange wire  -  Opto 2, channel 2
   - platform: gpio
     pin: GPIO7
-    id: opto_4
+    id: opto_lock
 
 # -------------------------------------------------------------
 #  BUTTONS
@@ -100,42 +117,44 @@ output:
 
 button:
   - platform: template
-    name: "Remote 1 - button A"
-    id: button_a
-    icon: "mdi:gate"
+    name: "Stop"
+    id: button_stop
+    icon: "mdi:stop-circle-outline"
     on_press:
-      - output.turn_on: opto_1
+      - output.turn_on: opto_stop
       - delay: ${pulse}
-      - output.turn_off: opto_1
+      - output.turn_off: opto_stop
 
   - platform: template
-    name: "Remote 1 - button B"
-    id: button_b
-    icon: "mdi:gate"
+    name: "Open"
+    id: button_open
+    icon: "mdi:gate-open"
     on_press:
-      - output.turn_on: opto_2
+      - output.turn_on: opto_open
       - delay: ${pulse}
-      - output.turn_off: opto_2
+      - output.turn_off: opto_open
 
   - platform: template
-    name: "Remote 1 - button C"
-    id: button_c
+    name: "Close"
+    id: button_close
     icon: "mdi:gate"
     on_press:
-      - output.turn_on: opto_3
+      - output.turn_on: opto_close
       - delay: ${pulse}
-      - output.turn_off: opto_3
+      - output.turn_off: opto_close
 
-  # WARNING: the function of this button is unknown.
-  # Only test it with the gate in direct line of sight.
+  # CAUTION: on most gate remotes "Lock" disables the drive and
+  # can make the gate ignore every remote until it is unlocked.
+  # Consider hiding this entity or putting it behind a
+  # confirmation once Home Assistant is connected.
   - platform: template
-    name: "Remote 1 - button D (unknown)"
-    id: button_d
-    icon: "mdi:help-circle-outline"
+    name: "Lock"
+    id: button_lock
+    icon: "mdi:lock-alert-outline"
     on_press:
-      - output.turn_on: opto_4
+      - output.turn_on: opto_lock
       - delay: ${pulse}
-      - output.turn_off: opto_4
+      - output.turn_off: opto_lock
 
 # -------------------------------------------------------------
 #  DIAGNOSTICS
