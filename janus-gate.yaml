@@ -1,0 +1,168 @@
+# =============================================================
+#  janus-gate  -  ESP32-S3 DevKitC-1 N16R8
+#  RF / Wi-Fi gate and garage controller
+# =============================================================
+#  Stage 3: four optocoupler channels driving the contacts of a
+#  3 V RF remote whose battery has been replaced by the ESP32 rail.
+#
+#  BEFORE EVERY FLASH:
+#  disconnect the remote from the optocouplers. GPIO states are
+#  undefined during boot and you can fire the gate by accident.
+# =============================================================
+
+substitutions:
+  device_name: "janus-gate"
+  # Pulse width for shorting the remote contacts.
+  # Start at 400ms. If the gate ignores it, raise to 600-800ms.
+  pulse: "400ms"
+
+esphome:
+  name: ${device_name}
+  friendly_name: "Janus Gate"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# Note: this board has 8 MB octal PSRAM (N16R8 variant), but the
+# project does not need it. The psram: section is deliberately
+# omitted - a wrong PSRAM config can cause a boot loop.
+# GPIO 33-37 are wired to PSRAM in hardware either way - keep clear.
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret api_key
+  # Without Home Assistant on the network, the api component would
+  # reboot the ESP every 15 minutes. Remove this line once HA is
+  # connected to restore the default watchdog behaviour.
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Fallback access point in case the credentials are wrong.
+  # Connect to it with a phone and fix the config from there.
+  ap:
+    ssid: "Janus Gate Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+
+# Test panel served at the device IP.
+# Works without Home Assistant - this is the bench test interface.
+web_server:
+  port: 80
+
+# -------------------------------------------------------------
+#  OUTPUTS  ->  LED side of the PC817 optocouplers
+# -------------------------------------------------------------
+#  GPIO -> IN+ on the PC817 module
+#  GND  -> IN- on the PC817 module
+#
+#  The transistor side goes to the remote's button contacts:
+#  collector to the pad measured at the higher potential,
+#  emitter to the lower one. The transistor side needs no ground.
+# -------------------------------------------------------------
+
+output:
+  - platform: gpio
+    pin: GPIO4
+    id: opto_1
+
+  - platform: gpio
+    pin: GPIO5
+    id: opto_2
+
+  - platform: gpio
+    pin: GPIO6
+    id: opto_3
+
+  - platform: gpio
+    pin: GPIO7
+    id: opto_4
+
+# -------------------------------------------------------------
+#  BUTTONS
+# -------------------------------------------------------------
+#  Each one shorts the remote contacts for ${pulse}, exactly like
+#  a finger press. Exposed in web_server and later in HA.
+# -------------------------------------------------------------
+
+button:
+  - platform: template
+    name: "Remote 1 - button A"
+    id: button_a
+    icon: "mdi:gate"
+    on_press:
+      - output.turn_on: opto_1
+      - delay: ${pulse}
+      - output.turn_off: opto_1
+
+  - platform: template
+    name: "Remote 1 - button B"
+    id: button_b
+    icon: "mdi:gate"
+    on_press:
+      - output.turn_on: opto_2
+      - delay: ${pulse}
+      - output.turn_off: opto_2
+
+  - platform: template
+    name: "Remote 1 - button C"
+    id: button_c
+    icon: "mdi:gate"
+    on_press:
+      - output.turn_on: opto_3
+      - delay: ${pulse}
+      - output.turn_off: opto_3
+
+  # WARNING: the function of this button is unknown.
+  # Only test it with the gate in direct line of sight.
+  - platform: template
+    name: "Remote 1 - button D (unknown)"
+    id: button_d
+    icon: "mdi:help-circle-outline"
+    on_press:
+      - output.turn_on: opto_4
+      - delay: ${pulse}
+      - output.turn_off: opto_4
+
+# -------------------------------------------------------------
+#  DIAGNOSTICS
+# -------------------------------------------------------------
+
+sensor:
+  - platform: wifi_signal
+    name: "Wi-Fi signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP address"
+
+# =============================================================
+#  PINS RESERVED FOR LATER STAGES - DO NOT REUSE
+# =============================================================
+#  Stage 5  CC1101:  CSN 10, MOSI 11, SCK 12, MISO 13,
+#                    GDO0 9, GDO2 8
+#  Stage 6  ON-OFF-ON switches:  15, 16  and  17, 18
+#  Stage 7  RFID reader:  14, 21, 42
+#
+#  Reserved in hardware / avoid:
+#  26-32 flash, 33-37 octal PSRAM, 0/3/45/46 strapping,
+#  19/20 USB-JTAG, 43/44 UART0, 38 or 48 RGB LED
+# =============================================================

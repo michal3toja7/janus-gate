@@ -1,0 +1,17 @@
+# Secrets - never commit
+secrets.yaml
+
+# ESPHome cache, builds and toolchain
+.esphome/
+
+# Compiled binaries
+*.bin
+*.elf
+
+# Virtual environment, if ESPHome is installed locally
+venv/
+.venv/
+
+# OS noise
+.DS_Store
+*.swp
