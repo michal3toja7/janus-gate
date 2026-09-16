@@ -4,6 +4,7 @@
 # =============================================================
 #  Stage 3: four optocoupler channels driving the contacts of a
 #  3 V RF remote whose battery has been replaced by the ESP32 rail.
+#  Stage 6: physical ON-OFF-ON switch, works without Wi-Fi or HA.
 #
 #  BEFORE EVERY FLASH:
 #  disconnect the remote from the optocouplers. GPIO states are
@@ -17,9 +18,17 @@
 
 substitutions:
   device_name: "janus-gate"
+
   # Pulse width for shorting the remote contacts.
   # Start at 400ms. If the gate ignores it, raise to 600-800ms.
   pulse: "400ms"
+
+  # How long the gate is ASSUMED to keep moving after a command.
+  # Real travel is about 30s; the extra margin is deliberate.
+  # Too long costs one wasted press. Too short makes the ESP think
+  # the gate is idle while it still moves, so the opposite command
+  # would reverse the drive under load instead of stopping it.
+  travel_time: "45s"
 
 esphome:
   name: ${device_name}
@@ -85,7 +94,34 @@ web_server:
 #  The transistor side goes to the remote's button contacts:
 #  collector to the pad measured at the higher potential,
 #  emitter to the lower one. The transistor side needs no ground.
+#
+#  PHYSICAL SWITCH 1  (ON-OFF-ON, momentary both ways)
+#  common -> GND, each position -> its own GPIO
+#  GPIO 15  up    -> cmd_open
+#  GPIO 16  down  -> cmd_close
 # =============================================================
+
+# -------------------------------------------------------------
+#  ASSUMED GATE STATE
+# -------------------------------------------------------------
+#  The ESP has no feedback from the gate - it only knows what it
+#  sent itself. This is an assumption, not a measurement, and it
+#  can drift if someone uses the original remote or the gate
+#  stalls on an obstacle.
+#
+#  The failure modes are asymmetric and that is what makes this
+#  worth doing: a stale "moving" state costs one extra press,
+#  because Stop on a stationary gate does nothing. A stale "idle"
+#  state simply behaves like no logic at all. There is no case
+#  that is worse than not having this feature.
+# -------------------------------------------------------------
+
+globals:
+  # 0 = idle, 1 = opening, 2 = closing
+  - id: gate_dir
+    type: int
+    restore_value: false
+    initial_value: '0'
 
 output:
   # Stop  -  grey wire  -  Opto 1, channel 2
@@ -108,40 +144,167 @@ output:
     pin: GPIO7
     id: opto_lock
 
-# -------------------------------------------------------------
-#  BUTTONS
-# -------------------------------------------------------------
-#  Each one shorts the remote contacts for ${pulse}, exactly like
-#  a finger press. Exposed in web_server and later in HA.
-# -------------------------------------------------------------
+# =============================================================
+#  SCRIPTS
+# =============================================================
+#  send_*  are primitives: they only pulse an optocoupler.
+#  cmd_*   carry the direction logic and call the primitives.
+#  Keeping them separate avoids recursion and leaves the raw
+#  pulses reachable for debugging.
+# =============================================================
 
-button:
-  - platform: template
-    name: "Stop"
-    id: button_stop
-    icon: "mdi:stop-circle-outline"
-    on_press:
+script:
+  # --- Primitives ---------------------------------------------
+
+  - id: send_open
+    mode: single
+    then:
+      - output.turn_on: opto_open
+      - delay: ${pulse}
+      - output.turn_off: opto_open
+
+  - id: send_close
+    mode: single
+    then:
+      - output.turn_on: opto_close
+      - delay: ${pulse}
+      - output.turn_off: opto_close
+
+  # Stop also clears the assumed state - the gate is standing
+  # still afterwards no matter what we believed before.
+  - id: send_stop
+    mode: single
+    then:
+      - script.stop: travel_timer
+      - lambda: 'id(gate_dir) = 0;'
       - output.turn_on: opto_stop
       - delay: ${pulse}
       - output.turn_off: opto_stop
 
+  - id: send_lock
+    mode: single
+    then:
+      - script.stop: travel_timer
+      - lambda: 'id(gate_dir) = 0;'
+      - output.turn_on: opto_lock
+      - delay: ${pulse}
+      - output.turn_off: opto_lock
+
+  # --- Assumed movement window --------------------------------
+
+  # mode: restart - a new command restarts the countdown.
+  - id: travel_timer
+    mode: restart
+    then:
+      - delay: ${travel_time}
+      - lambda: 'id(gate_dir) = 0;'
+
+  # --- Direction logic ----------------------------------------
+
+  # Opposite direction while moving sends Stop instead.
+  # This gate controller reverses immediately on the opposite
+  # command, which is hard on the motor and gearbox under load,
+  # so inserting a Stop protects the mechanics as well as
+  # matching what the user actually meant.
+  #
+  # Pressing the SAME direction again just repeats the command
+  # and restarts the window. Harmless on this controller.
+
+  - id: cmd_open
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(gate_dir) == 2;'
+          then:
+            - logger.log: "Closing in progress - sending Stop instead of Open"
+            - script.execute: send_stop
+          else:
+            - lambda: 'id(gate_dir) = 1;'
+            - script.execute: travel_timer
+            - script.execute: send_open
+
+  - id: cmd_close
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(gate_dir) == 1;'
+          then:
+            - logger.log: "Opening in progress - sending Stop instead of Close"
+            - script.execute: send_stop
+          else:
+            - lambda: 'id(gate_dir) = 2;'
+            - script.execute: travel_timer
+            - script.execute: send_close
+
+# =============================================================
+#  PHYSICAL SWITCH  -  works with no Wi-Fi and no Home Assistant
+# =============================================================
+#  ON-OFF-ON momentary. Common pin to GND, each position to its
+#  own GPIO. Internal pullups, so no external resistors.
+# =============================================================
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO15
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Switch up"
+    id: sw_up
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - script.execute: cmd_open
+
+  - platform: gpio
+    pin:
+      number: GPIO16
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Switch down"
+    id: sw_down
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - script.execute: cmd_close
+
+# =============================================================
+#  BUTTONS
+# =============================================================
+#  Primary controls go through the direction logic.
+#  The (direct) ones bypass it and pulse the optocoupler raw -
+#  useful when the state machine and reality disagree.
+# =============================================================
+
+button:
   - platform: template
     name: "Open"
     id: button_open
     icon: "mdi:gate-open"
     on_press:
-      - output.turn_on: opto_open
-      - delay: ${pulse}
-      - output.turn_off: opto_open
+      - script.execute: cmd_open
 
   - platform: template
     name: "Close"
     id: button_close
     icon: "mdi:gate"
     on_press:
-      - output.turn_on: opto_close
-      - delay: ${pulse}
-      - output.turn_off: opto_close
+      - script.execute: cmd_close
+
+  - platform: template
+    name: "Stop"
+    id: button_stop
+    icon: "mdi:stop-circle-outline"
+    on_press:
+      - script.execute: send_stop
 
   # CAUTION: on most gate remotes "Lock" disables the drive and
   # can make the gate ignore every remote until it is unlocked.
@@ -152,9 +315,36 @@ button:
     id: button_lock
     icon: "mdi:lock-alert-outline"
     on_press:
-      - output.turn_on: opto_lock
-      - delay: ${pulse}
-      - output.turn_off: opto_lock
+      - script.execute: send_lock
+
+  # --- Raw pulses, no direction logic -------------------------
+
+  - platform: template
+    name: "Open (direct)"
+    id: button_open_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_open
+
+  - platform: template
+    name: "Close (direct)"
+    id: button_close_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_close
+
+  # Forces the assumed state back to idle without touching the
+  # gate. Use when the ESP and reality have drifted apart.
+  - platform: template
+    name: "Reset assumed state"
+    id: button_reset_state
+    icon: "mdi:backup-restore"
+    entity_category: diagnostic
+    on_press:
+      - script.stop: travel_timer
+      - lambda: 'id(gate_dir) = 0;'
 
 # -------------------------------------------------------------
 #  DIAGNOSTICS
@@ -173,12 +363,26 @@ text_sensor:
     ip_address:
       name: "IP address"
 
+  # What the ESP believes the gate is doing. An assumption,
+  # not a measurement - see the note above.
+  - platform: template
+    name: "Assumed movement"
+    id: assumed_movement
+    icon: "mdi:gate-arrow-right"
+    update_interval: 1s
+    lambda: |-
+      switch (id(gate_dir)) {
+        case 1: return {"opening"};
+        case 2: return {"closing"};
+        default: return {"idle"};
+      }
+
 # =============================================================
 #  PINS RESERVED FOR LATER STAGES - DO NOT REUSE
 # =============================================================
 #  Stage 5  CC1101:  CSN 10, MOSI 11, SCK 12, MISO 13,
 #                    GDO0 9, GDO2 8
-#  Stage 6  ON-OFF-ON switches:  15, 16  and  17, 18
+#  Stage 5  switch 2 (gate 2 via CC1101):  17, 18
 #  Stage 7  RFID reader:  14, 21, 42
 #
 #  Reserved in hardware / avoid:
