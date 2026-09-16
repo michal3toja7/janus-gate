@@ -1,0 +1,64 @@
+# =============================================================
+#  core  -  board, connectivity and flashing
+# =============================================================
+#  Nothing here is in the control chain. The physical switches
+#  keep working with every one of these components down; this
+#  file only decides how the device is reached and updated.
+# =============================================================
+
+esphome:
+  name: ${device_name}
+  friendly_name: "Janus Gate"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# Note: this board has 8 MB octal PSRAM (N16R8 variant), but the
+# project does not need it. The psram: section is deliberately
+# omitted - a wrong PSRAM config can cause a boot loop.
+# GPIO 33-37 are wired to PSRAM in hardware either way - keep clear.
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret api_key
+  # reboot_timeout: 0s MUST STAY, including now that Home
+  # Assistant is connected. The default behaviour reboots the ESP
+  # every 15 minutes whenever HA is unreachable, which would turn
+  # any router or server outage into a gate controller stuck in a
+  # reboot loop. This device is built to keep working with the
+  # network down - rebooting because a server is missing defeats
+  # the entire point of it.
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  # Firmware upload straight from the web panel - no laptop and no
+  # ESPHome toolchain needed on site. Build the .bin at home, keep
+  # it on a phone, upload it through the browser if needed.
+  - platform: web_server
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # THIS IS THE ON-SITE ACCESS PATH.
+  # Away from the home network the ESP serves its own AP. Join it
+  # with a phone and browse to 192.168.4.1 to reach the panel and
+  # run the learning procedure. Test this before going on site.
+  ap:
+    ssid: "Janus Gate Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+web_server:
+  port: 80
+  auth:
+    username: !secret web_username
+    password: !secret web_password

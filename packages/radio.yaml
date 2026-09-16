@@ -1,0 +1,88 @@
+# =============================================================
+#  radio  -  CC1101 433 MHz front end and transmitter
+# =============================================================
+#  Hardware layer only. The receiver lives in learning.yaml,
+#  because its on_raw trigger IS the learning logic and the raw
+#  pulse vector it works on exists nowhere else.
+#
+#  Consumed by gate.yaml, which transmits learned frames through
+#  rf_tx but knows nothing about the radio's configuration.
+# =============================================================
+
+#  Gate   | up    |  17  | cmd_gate_open
+#  Gate   | down  |  18  | cmd_gate_close
+#
+#  ---------------------------------------------------------------
+#  CC1101 433 MHz  -  Ebyte E07-M1101D-SMA pinout
+#
+#  PIN | SIGNAL | ESP32-S3 | NOTE
+#  ----+--------+----------+----------------------------------
+#   1  | GND    |   GND    |
+#   2  | VCC    |   3.3 V  | never 5 V, own branch from the
+#      |        |          | DevKit 3V3 pin, not daisy-chained
+#      |        |          | behind the remote
+#   3  | GDO0   |  GPIO9   | transmit data
+#   4  | CSN    |  GPIO10  |
+#   5  | SCK    |  GPIO12  |
+#   6  | MOSI   |  GPIO11  |
+#   7  | MISO   |  GPIO13  |
+#   8  | GDO2   |  GPIO8   | receive data
+#   9  | GND    |    -     | optional extra ground
+#  10  | GND    |    -     | optional extra ground
+#
+#  NOTE: pins 7 and 8 are swapped relative to the common generic
+#  CC1101 breakout, which puts GDO2 on 7 and MISO on 8. Always
+#  check against the datasheet for the module in hand. Pin 1 is
+#  GND and has continuity with the SMA connector shell - that is
+#  the reliable way to orient the header.
+#
+#  100 nF + 47 uF across VCC and GND, as close to the header as
+#  possible. Antenna fitted before power-up.
+# =============================================================
+
+spi:
+  clk_pin: GPIO12
+  mosi_pin: GPIO11
+  miso_pin: GPIO13
+
+# -------------------------------------------------------------
+#  CC1101 radio front end
+# -------------------------------------------------------------
+#  gdo0_pin is deliberately NOT set in this block. It is only
+#  used for the FIFO-mode RX interrupt, and setting it re-routes
+#  the pad away from the RMT peripheral, which silently kills
+#  transmit - the chip enters TX but nothing reaches the air.
+#  Dual-pin wiring keeps TX on GDO0 and RX on GDO2 instead.
+#
+#  filter_bandwidth is deliberately WIDE. This is the most
+#  load-bearing line in this file: narrowing it to 58 kHz killed
+#  reception completely, twice, while the radio still looked
+#  perfectly healthy. Do not "optimise" it back.
+#
+#  Two reasons it has to stay wide. Cheap remotes use SAW
+#  resonators that can sit hundreds of kHz off their nominal
+#  frequency, and a narrow window simply misses them - wide
+#  bandwidth forgives that detuning. And the extra noise a wide
+#  window lets in costs nothing here, because it is rejected in
+#  software by the two-frame confirmation in learning.yaml.
+#
+#  rx_attenuation stays at 0dB for the same reason. The lesson
+#  learned the hard way: do not fight noise at the radio layer.
+#  Let the receiver hear everything and filter in logic.
+# -------------------------------------------------------------
+
+cc1101:
+  id: radio
+  cs_pin: GPIO10
+  frequency: ${rf_frequency}
+  modulation_type: ASK/OOK
+  filter_bandwidth: 200kHz
+  rx_attenuation: 0dB
+  output_power: 10
+
+remote_transmitter:
+  id: rf_tx
+  pin: GPIO9
+  # OOK has no sub-carrier - the RF carrier is simply keyed on
+  # and off, so the data line must be driven solid, not chopped.
+  carrier_duty_percent: 100%

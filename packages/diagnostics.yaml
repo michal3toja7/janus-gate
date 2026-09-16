@@ -1,0 +1,35 @@
+# =============================================================
+#  diagnostics  -  device-level, not drive-level
+# =============================================================
+#  Per-drive diagnostics live with their drive. What is left here
+#  is what belongs to the box itself, plus the one control that
+#  deliberately spans both drives.
+# =============================================================
+
+sensor:
+  - platform: wifi_signal
+    name: "Wi-Fi signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP address"
+
+button:
+  # Forces both assumed states back to idle without touching
+  # either drive. Use when the ESP and reality have drifted apart.
+  - platform: template
+    name: "Reset assumed state"
+    id: button_reset_state
+    icon: "mdi:backup-restore"
+    entity_category: diagnostic
+    on_press:
+      - script.stop: garage_travel_timer
+      - script.stop: gate_travel_timer
+      - lambda: |-
+          id(garage_dir) = 0;
+          id(gate_dir) = 0;

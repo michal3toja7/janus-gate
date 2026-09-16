@@ -1,0 +1,333 @@
+# =============================================================
+#  learning  -  on-device capture of the gate remote's frame
+# =============================================================
+#  The gate remote lives at the gate, not at the bench, so the
+#  device learns its frame on site rather than having one baked
+#  into firmware. The side effect is a better product: it can be
+#  re-taught, moved to another gate, or taught an extra remote
+#  without reflashing.
+#
+#  Raw pulse timings are stored, NOT a decoded rc_switch code.
+#  Decoded storage would be far smaller, but it only works if a
+#  built-in decoder recognises the protocol - and learning happens
+#  on site with no chance to debug. Universality beat elegance.
+#
+#  remote_receiver lives here rather than in radio.yaml: its
+#  on_raw trigger IS this logic, and the raw pulse vector it
+#  works on exists nowhere else.
+#
+#  This file is the sole producer of the learned frames.
+#  gate.yaml consumes them by id and never writes them.
+# =============================================================
+
+#  RECEIVER
+# -------------------------------------------------------------
+#  There is no dump: line here, and that is deliberate - omitting
+#  it is how dumping is switched off. "dump: none" is NOT valid;
+#  there is no dumper by that name.
+#
+#  Never set dump: all. It also runs the INFRARED decoders, and
+#  Pronto and Beo4 in particular will happily "recognise" pure RF
+#  noise and bury the log in megabytes of hex. Raw replay needs no
+#  decoder at all. on_raw below fires regardless of dump.
+#
+#  filter: 100us, NOT 250us. The remote's short pulses measure
+#  around 275-300 us, so a 250 us filter discarded every single
+#  bit once jitter was accounted for and reception stopped dead.
+#  100 us still clears genuine spikes without touching real data.
+# -------------------------------------------------------------
+
+remote_receiver:
+  id: rf_rx
+  pin: GPIO8
+  filter: 100us
+  idle: 6ms
+  buffer_size: 10000b
+  tolerance: 50%
+  on_raw:
+    then:
+      # ---------------------------------------------------------
+      #  TWO-FRAME CONFIRMATION
+      # ---------------------------------------------------------
+      #  A single frame is not trusted. The receiver picks up
+      #  background noise constantly, and noise can easily be long
+      #  enough to look like a code - so accepting the first frame
+      #  would mean storing junk before the remote is even pressed.
+      #
+      #  A real remote sends the same frame several times per
+      #  press. Noise never repeats. So the first usable frame is
+      #  only held as a candidate, and a code is stored only once
+      #  a second frame arrives that matches it within tolerance.
+      #
+      #  In practice: hold the remote button down for a moment
+      #  rather than tapping it.
+      # ---------------------------------------------------------
+      - lambda: |-
+          if (id(learn_target) == 0) return;
+
+          size_t n = x.size();
+          if (n < 24 || n > 128) return;
+
+          bool match = false;
+          if ((size_t) id(cand_len) == n) {
+            match = true;
+            for (size_t i = 0; i < n; i++) {
+              int32_t a = id(cand_code)[i];
+              int32_t b = x[i];
+              // Sign carries mark vs space - never mix them up.
+              if ((a < 0) != (b < 0)) { match = false; break; }
+              int32_t da = a < 0 ? -a : a;
+              int32_t db = b < 0 ? -b : b;
+              int32_t diff = da > db ? da - db : db - da;
+              // A quarter of the pulse width plus a flat 60 us.
+              // Loose enough for receiver jitter, tight enough
+              // that two different noise bursts never agree.
+              if (diff > da / 4 + 60) { match = false; break; }
+            }
+          }
+
+          if (!match) {
+            id(cand_len) = n;
+            for (size_t i = 0; i < n; i++) id(cand_code)[i] = x[i];
+            ESP_LOGD("learn", "Candidate: %u pulses - press again to confirm",
+                     (unsigned) n);
+            return;
+          }
+
+          int32_t *dst = nullptr;
+          const char *label = "";
+          switch (id(learn_target)) {
+            case 1: dst = id(code_gate_open);  label = "OPEN";
+                    id(len_gate_open)  = n; break;
+            case 2: dst = id(code_gate_close); label = "CLOSE";
+                    id(len_gate_close) = n; break;
+            case 3: dst = id(code_gate_stop);  label = "STOP";
+                    id(len_gate_stop)  = n; break;
+            default: return;
+          }
+          for (size_t i = 0; i < n; i++) dst[i] = x[i];
+
+          ESP_LOGI("learn", "CONFIRMED %s: %u pulses", label, (unsigned) n);
+          id(learn_target) = 0;
+          id(cand_len) = 0;
+
+      # Only stops the window once the lambda above disarmed
+      # learn mode, i.e. after a confirmed capture.
+      - if:
+          condition:
+            lambda: 'return id(learn_target) == 0;'
+          then:
+            - script.stop: learn_timeout_timer
+
+# -------------------------------------------------------------
+#  STATE
+# -------------------------------------------------------------
+#  Learned frames live in NVS and survive a reboot, so the codes
+#  are captured once on site and never again. 128 pulses is
+#  comfortably more than a 24-bit fixed-code frame needs.
+# -------------------------------------------------------------
+
+globals:
+  # --- Gate: learn mode target --------------------------------
+  #  0 = off, 1 = open, 2 = close, 3 = stop
+  - id: learn_target
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # --- Gate: candidate frame awaiting confirmation ------------
+  #  Deliberately NOT restored - a half-finished capture must
+  #  never survive a reboot.
+  - id: cand_code
+    type: int32_t[128]
+    restore_value: false
+  - id: cand_len
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # --- Gate: learned frames -----------------------------------
+  - id: code_gate_open
+    type: int32_t[128]
+    restore_value: true
+  - id: len_gate_open
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: code_gate_close
+    type: int32_t[128]
+    restore_value: true
+  - id: len_gate_close
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: code_gate_stop
+    type: int32_t[128]
+    restore_value: true
+  - id: len_gate_stop
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+script:
+  #  Arm a slot, then HOLD the matching button on the original
+  #  remote for a moment. Two matching frames are required before
+  #  anything is stored - see the note on the receiver above.
+  #  Raw timings are stored rather than a decoded protocol, so
+  #  this works even for encodings no decoder recognises.
+
+  - id: learn_timeout_timer
+    mode: restart
+    then:
+      - delay: ${learn_timeout}
+      - lambda: |-
+          if (id(learn_target) != 0) {
+            ESP_LOGW("learn", "Learn mode timed out - nothing stored");
+            id(learn_target) = 0;
+            id(cand_len) = 0;
+          }
+
+# -------------------------------------------------------------
+#  ENTITIES
+# -------------------------------------------------------------
+
+binary_sensor:
+  # --- Learned code presence ----------------------------------
+
+  - platform: template
+    name: "Gate open learned"
+    id: has_gate_open
+    entity_category: diagnostic
+    lambda: 'return id(len_gate_open) > 0;'
+
+  - platform: template
+    name: "Gate close learned"
+    id: has_gate_close
+    entity_category: diagnostic
+    lambda: 'return id(len_gate_close) > 0;'
+
+  - platform: template
+    name: "Gate stop learned"
+    id: has_gate_stop
+    entity_category: diagnostic
+    lambda: 'return id(len_gate_stop) > 0;'
+
+button:
+  - platform: template
+    name: "Learn gate open"
+    id: button_learn_open
+    icon: "mdi:school-outline"
+    on_press:
+      - lambda: |-
+          id(learn_target) = 1;
+          id(cand_len) = 0;
+      - logger.log: "Learn ARMED for OPEN - hold the remote button"
+      - script.execute: learn_timeout_timer
+
+  - platform: template
+    name: "Learn gate close"
+    id: button_learn_close
+    icon: "mdi:school-outline"
+    on_press:
+      - lambda: |-
+          id(learn_target) = 2;
+          id(cand_len) = 0;
+      - logger.log: "Learn ARMED for CLOSE - hold the remote button"
+      - script.execute: learn_timeout_timer
+
+  - platform: template
+    name: "Learn gate stop"
+    id: button_learn_stop
+    icon: "mdi:school-outline"
+    on_press:
+      - lambda: |-
+          id(learn_target) = 3;
+          id(cand_len) = 0;
+      - logger.log: "Learn ARMED for STOP - hold the remote button"
+      - script.execute: learn_timeout_timer
+
+  - platform: template
+    name: "Cancel learning"
+    id: button_learn_cancel
+    icon: "mdi:close-circle-outline"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(learn_target) = 0;
+          id(cand_len) = 0;
+      - script.stop: learn_timeout_timer
+      - logger.log: "Learn mode cancelled"
+
+  # Wipes all three learned frames. There is no undo - the codes
+  # have to be learned from the original remote again.
+  - platform: template
+    name: "Forget all gate codes"
+    id: button_forget_all
+    icon: "mdi:delete-forever-outline"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          id(len_gate_open) = 0;
+          id(len_gate_close) = 0;
+          id(len_gate_stop) = 0;
+          ESP_LOGW("learn", "All gate codes erased");
+
+  # --- Diagnostics --------------------------------------------
+
+sensor:
+  # Pulse counts of the stored frames. A plausible fixed-code
+  # frame lands somewhere around 25-100 pulses. This is the only
+  # way to tell a real capture from stored junk while on site.
+  - platform: template
+    name: "Gate open pulses"
+    id: pulses_gate_open
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: 'return id(len_gate_open);'
+
+  - platform: template
+    name: "Gate close pulses"
+    id: pulses_gate_close
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: 'return id(len_gate_close);'
+
+  - platform: template
+    name: "Gate stop pulses"
+    id: pulses_gate_stop
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: 'return id(len_gate_stop);'
+
+  # Live view of the frame waiting for confirmation. Useful on
+  # site: if this keeps jumping to different values, the receiver
+  # is chewing on noise rather than the remote.
+  - platform: template
+    name: "Candidate pulses"
+    id: pulses_candidate
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 1s
+    lambda: 'return id(cand_len);'
+
+text_sensor:
+  - platform: template
+    name: "Learn mode"
+    id: learn_mode_state
+    icon: "mdi:school-outline"
+    update_interval: 1s
+    lambda: |-
+      if (id(learn_target) == 0) return {"idle"};
+      std::string what;
+      switch (id(learn_target)) {
+        case 1: what = "OPEN";  break;
+        case 2: what = "CLOSE"; break;
+        case 3: what = "STOP";  break;
+      }
+      if (id(cand_len) > 0) return {"candidate held - " + what};
+      return {"waiting for " + what};

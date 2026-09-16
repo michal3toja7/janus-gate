@@ -1,0 +1,256 @@
+# =============================================================
+#  gate  -  CC1101 replay path
+# =============================================================
+#  The gate's original remote is NOT in our possession, so no
+#  code is baked into firmware. The device learns the remote's
+#  raw OOK frame on site (see learning.yaml), keeps it in NVS and
+#  replays it through rf_tx.
+#
+#  This file owns the gate's direction logic and its entities.
+#  It reads the learned frames by id but never writes them -
+#  learning.yaml is their sole producer.
+#
+#  PHYSICAL SWITCH  (ON-OFF-ON momentary, DPDT - one pole used)
+#  Centre pin to GND, the two outer pins to their GPIOs.
+#
+#  LEVER | GPIO | ACTION
+#  ------+------+----------------
+#  up    |  17  | cmd_gate_open
+#  down  |  18  | cmd_gate_close
+#
+#  The lever inversion note in garage.yaml applies here too.
+# =============================================================
+
+globals:
+  # --- Gate: assumed movement ---------------------------------
+  #  Same reasoning as the garage above. Unlike the garage there
+  #  is a second failure mode: if the STOP code was never learned
+  #  there is nothing to send, so cmd_gate_* falls back to sending
+  #  the requested direction rather than doing nothing at all.
+  #  0 = idle, 1 = opening, 2 = closing
+  - id: gate_dir
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# -------------------------------------------------------------
+#  SCRIPTS
+# -------------------------------------------------------------
+#  send_gate_* are the raw primitives - they key the radio and
+#  nothing else. The anti-reverse logic lives in cmd_gate_*,
+#  mirroring the garage.
+# -------------------------------------------------------------
+
+script:
+  - id: send_gate_open
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(len_gate_open) == 0;'
+          then:
+            - logger.log: "Gate OPEN not learned yet - nothing sent"
+          else:
+            - remote_transmitter.transmit_raw:
+                code: !lambda |-
+                  return std::vector<int32_t>(
+                    id(code_gate_open),
+                    id(code_gate_open) + id(len_gate_open));
+                repeat:
+                  times: ${rf_repeats}
+                  wait_time: 10ms
+
+  - id: send_gate_close
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(len_gate_close) == 0;'
+          then:
+            - logger.log: "Gate CLOSE not learned yet - nothing sent"
+          else:
+            - remote_transmitter.transmit_raw:
+                code: !lambda |-
+                  return std::vector<int32_t>(
+                    id(code_gate_close),
+                    id(code_gate_close) + id(len_gate_close));
+                repeat:
+                  times: ${rf_repeats}
+                  wait_time: 10ms
+
+  - id: send_gate_stop
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(len_gate_stop) == 0;'
+          then:
+            - logger.log: "Gate STOP not learned yet - nothing sent"
+          else:
+            - script.stop: gate_travel_timer
+            - lambda: 'id(gate_dir) = 0;'
+            - remote_transmitter.transmit_raw:
+                code: !lambda |-
+                  return std::vector<int32_t>(
+                    id(code_gate_stop),
+                    id(code_gate_stop) + id(len_gate_stop));
+                repeat:
+                  times: ${rf_repeats}
+                  wait_time: 10ms
+
+  # ---------------------------------------------------------
+  #  GATE  -  direction logic
+  # ---------------------------------------------------------
+  #  Mirrors the garage: the opposite direction while moving
+  #  sends Stop instead of reversing the drive under load.
+  #
+  #  IMPORTANT DIFFERENCE: the gate's Stop is a learned RF code,
+  #  not a hard-wired contact, so it may not exist. When it has
+  #  not been learned the fallback is to send the requested
+  #  direction anyway - doing nothing would be worse than the
+  #  reverse this logic is meant to prevent.
+
+  - id: gate_travel_timer
+    mode: restart
+    then:
+      - delay: ${gate_travel_time}
+      - lambda: 'id(gate_dir) = 0;'
+
+  - id: cmd_gate_open
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(gate_dir) == 2 && id(len_gate_stop) > 0;'
+          then:
+            - logger.log: "Gate closing - sending Stop instead of Open"
+            - script.stop: gate_travel_timer
+            - lambda: 'id(gate_dir) = 0;'
+            - script.execute: send_gate_stop
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(gate_dir) == 2;'
+                then:
+                  - logger.log: "Gate closing but no Stop code learned - sending Open anyway"
+            - lambda: 'id(gate_dir) = 1;'
+            - script.execute: gate_travel_timer
+            - script.execute: send_gate_open
+
+  - id: cmd_gate_close
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(gate_dir) == 1 && id(len_gate_stop) > 0;'
+          then:
+            - logger.log: "Gate opening - sending Stop instead of Close"
+            - script.stop: gate_travel_timer
+            - lambda: 'id(gate_dir) = 0;'
+            - script.execute: send_gate_stop
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(gate_dir) == 1;'
+                then:
+                  - logger.log: "Gate opening but no Stop code learned - sending Close anyway"
+            - lambda: 'id(gate_dir) = 2;'
+            - script.execute: gate_travel_timer
+            - script.execute: send_gate_close
+
+  # ---------------------------------------------------------
+
+# -------------------------------------------------------------
+#  PHYSICAL SWITCH  -  works with the network down
+# -------------------------------------------------------------
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO17
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Gate switch up"
+    id: sw_gate_up
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - script.execute: cmd_gate_open
+
+  - platform: gpio
+    pin:
+      number: GPIO18
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Gate switch down"
+    id: sw_gate_down
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - script.execute: cmd_gate_close
+
+button:
+  - platform: template
+    name: "Gate open"
+    id: button_gate_open
+    icon: "mdi:gate-open"
+    on_press:
+      - script.execute: cmd_gate_open
+
+  - platform: template
+    name: "Gate close"
+    id: button_gate_close
+    icon: "mdi:gate"
+    on_press:
+      - script.execute: cmd_gate_close
+
+  - platform: template
+    name: "Gate stop"
+    id: button_gate_stop
+    icon: "mdi:stop-circle-outline"
+    on_press:
+      - script.execute: send_gate_stop
+
+  # --- Learning -----------------------------------------------
+  #  Press one of these, then HOLD the matching button on the
+  #  original remote close to the antenna. Watch "Learn mode":
+  #  it goes from "waiting" to "candidate held" to idle, and the
+  #  pulse count below shows what was stored.
+
+  # --- Diagnostics: bypass the direction logic entirely --------
+  #  Used to test a freshly learned code: these transmit the
+  #  stored frame without consulting the assumed state.
+  - platform: template
+    name: "Gate open (direct)"
+    id: button_gate_open_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_gate_open
+
+  - platform: template
+    name: "Gate close (direct)"
+    id: button_gate_close_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_gate_close
+
+text_sensor:
+  - platform: template
+    name: "Gate assumed movement"
+    id: gate_assumed_movement
+    icon: "mdi:gate-arrow-right"
+    update_interval: 1s
+    lambda: |-
+      switch (id(gate_dir)) {
+        case 1: return {"opening"};
+        case 2: return {"closing"};
+        default: return {"idle"};
+      }

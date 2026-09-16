@@ -1,0 +1,272 @@
+# =============================================================
+#  garage  -  optocoupler path
+# =============================================================
+#  The original 3 V remote sits inside the enclosure with its
+#  battery removed, running off the ESP32 rail. The ESP shorts
+#  the remote's own button contacts through PC817 optocouplers,
+#  exactly like a finger press, so the drive still sees a remote
+#  it was already paired with. Nothing was reverse-engineered.
+#
+#  Everything for this drive is in this file: the outputs, the
+#  scripts, the buttons, the switch and the assumed state.
+# =============================================================
+#
+#  WIRING  -  remote 1 (3 V, four buttons) via PC817
+#
+#  FUNCTION | GPIO | WIRE COLOUR | MODULE | CHANNEL
+#  ---------+------+-------------+--------+--------
+#  Stop     |   4  | grey        | Opto 1 |    2
+#  Open     |   5  | white       | Opto 1 |    1
+#  Close    |   6  | yellow      | Opto 2 |    1
+#  Lock     |   7  | orange      | Opto 2 |    2
+#
+#  GPIO -> IN+ on the PC817 module
+#  GND  -> IN- on the PC817 module
+#  Transistor side to the remote contacts: collector to the pad
+#  at the higher potential, emitter to the lower. No ground.
+#
+#  HARDWARE NOTE - OPTOCOUPLER JUMPERS:
+#  The per-channel jumpers on both PC817 modules must stay
+#  REMOVED. With the jumpers fitted the channels are permanently
+#  triggered, which holds a remote button down and locks up the
+#  remote's encoder - every button then appears dead.
+#
+#  PHYSICAL SWITCH  (ON-OFF-ON momentary, DPDT - one pole used)
+#  Centre pin to GND, the two outer pins to their GPIOs.
+#
+#  LEVER | GPIO | ACTION
+#  ------+------+------------------
+#  up    |  15  | cmd_garage_open
+#  down  |  16  | cmd_garage_close
+#
+#  HARDWARE NOTE - TOGGLE LEVER INVERSION:
+#  A toggle lever pivots, so pushing it UP closes the contact on
+#  the LOWER side of the body. The GPIOs above are assigned by
+#  LEVER POSITION as the user experiences it, which is the
+#  opposite of the terminal position on the switch body. This was
+#  fixed by swapping the wires, not the config - if the connectors
+#  are ever re-made, the inversion applies again.
+# =============================================================
+
+globals:
+  # --- Garage: assumed movement -------------------------------
+  #  The ESP has no feedback from the drive - it only knows what
+  #  it sent itself. The failure modes are asymmetric and that is
+  #  what makes this worth doing: a stale "moving" state costs one
+  #  extra press, because Stop on a stationary door does nothing.
+  #  A stale "idle" state behaves like no logic at all.
+  #  0 = idle, 1 = opening, 2 = closing
+  - id: garage_dir
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+output:
+  # Stop  -  grey wire  -  Opto 1, channel 2
+  - platform: gpio
+    pin: GPIO4
+    id: opto_garage_stop
+
+  # Open  -  white wire  -  Opto 1, channel 1
+  - platform: gpio
+    pin: GPIO5
+    id: opto_garage_open
+
+  # Close  -  yellow wire  -  Opto 2, channel 1
+  - platform: gpio
+    pin: GPIO6
+    id: opto_garage_close
+
+  # Lock  -  orange wire  -  Opto 2, channel 2
+  - platform: gpio
+    pin: GPIO7
+    id: opto_garage_lock
+
+# -------------------------------------------------------------
+#  SCRIPTS
+# -------------------------------------------------------------
+#  send_*  are primitives: they pulse an optocoupler and nothing
+#          else. cmd_* carry the direction logic and call them.
+#  Keeping them separate avoids recursion and leaves the raw
+#  actions reachable for debugging through the (direct) buttons.
+# -------------------------------------------------------------
+
+script:
+  - id: send_garage_open
+    mode: single
+    then:
+      - output.turn_on: opto_garage_open
+      - delay: ${pulse}
+      - output.turn_off: opto_garage_open
+
+  - id: send_garage_close
+    mode: single
+    then:
+      - output.turn_on: opto_garage_close
+      - delay: ${pulse}
+      - output.turn_off: opto_garage_close
+
+  # Stop also clears the assumed state - the door is standing
+  # still afterwards no matter what we believed before.
+  - id: send_garage_stop
+    mode: single
+    then:
+      - script.stop: garage_travel_timer
+      - lambda: 'id(garage_dir) = 0;'
+      - output.turn_on: opto_garage_stop
+      - delay: ${pulse}
+      - output.turn_off: opto_garage_stop
+
+  - id: send_garage_lock
+    mode: single
+    then:
+      - script.stop: garage_travel_timer
+      - lambda: 'id(garage_dir) = 0;'
+      - output.turn_on: opto_garage_lock
+      - delay: ${pulse}
+      - output.turn_off: opto_garage_lock
+
+  # mode: restart - a new command restarts the countdown.
+  - id: garage_travel_timer
+    mode: restart
+    then:
+      - delay: ${travel_time}
+      - lambda: 'id(garage_dir) = 0;'
+
+  # Opposite direction while moving sends Stop instead. This
+  # drive reverses immediately on the opposite command, which is
+  # hard on the motor and gearbox under load, so inserting a Stop
+  # protects the mechanics as well as matching intent.
+  # Pressing the SAME direction again just repeats the command.
+  - id: cmd_garage_open
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(garage_dir) == 2;'
+          then:
+            - logger.log: "Garage closing - sending Stop instead of Open"
+            - script.execute: send_garage_stop
+          else:
+            - lambda: 'id(garage_dir) = 1;'
+            - script.execute: garage_travel_timer
+            - script.execute: send_garage_open
+
+  - id: cmd_garage_close
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(garage_dir) == 1;'
+          then:
+            - logger.log: "Garage opening - sending Stop instead of Close"
+            - script.execute: send_garage_stop
+          else:
+            - lambda: 'id(garage_dir) = 2;'
+            - script.execute: garage_travel_timer
+            - script.execute: send_garage_close
+
+# -------------------------------------------------------------
+#  PHYSICAL SWITCH  -  works with the network down
+# -------------------------------------------------------------
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO15
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Garage switch up"
+    id: sw_garage_up
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - script.execute: cmd_garage_open
+
+  - platform: gpio
+    pin:
+      number: GPIO16
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "Garage switch down"
+    id: sw_garage_down
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 30ms
+    on_press:
+      - script.execute: cmd_garage_close
+
+  # --- Gate switch --------------------------------------------
+
+button:
+  - platform: template
+    name: "Garage open"
+    id: button_garage_open
+    icon: "mdi:garage-open-variant"
+    on_press:
+      - script.execute: cmd_garage_open
+
+  - platform: template
+    name: "Garage close"
+    id: button_garage_close
+    icon: "mdi:garage-variant"
+    on_press:
+      - script.execute: cmd_garage_close
+
+  - platform: template
+    name: "Garage stop"
+    id: button_garage_stop
+    icon: "mdi:stop-circle-outline"
+    on_press:
+      - script.execute: send_garage_stop
+
+  # CAUTION: on most drives "Lock" disables the motor and can make
+  # it ignore every remote until it is unlocked. Consider hiding
+  # this entity or putting it behind a confirmation in HA.
+  - platform: template
+    name: "Garage lock"
+    id: button_garage_lock
+    icon: "mdi:lock-alert-outline"
+    on_press:
+      - script.execute: send_garage_lock
+
+  # --- Gate ---------------------------------------------------
+
+  # --- Diagnostics: bypass the direction logic entirely --------
+  #  The escape hatch for when the assumed state and reality have
+  #  drifted apart. These fire the optocoupler directly.
+  - platform: template
+    name: "Garage open (direct)"
+    id: button_garage_open_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_garage_open
+
+  - platform: template
+    name: "Garage close (direct)"
+    id: button_garage_close_raw
+    icon: "mdi:flash-outline"
+    entity_category: diagnostic
+    on_press:
+      - script.execute: send_garage_close
+
+text_sensor:
+  # What the ESP believes the garage door is doing.
+  # An assumption, not a measurement - see the note above.
+  - platform: template
+    name: "Garage assumed movement"
+    id: garage_assumed_movement
+    icon: "mdi:garage-alert-variant"
+    update_interval: 1s
+    lambda: |-
+      switch (id(garage_dir)) {
+        case 1: return {"opening"};
+        case 2: return {"closing"};
+        default: return {"idle"};
+      }
