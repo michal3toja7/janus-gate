@@ -126,6 +126,27 @@ script:
       - delay: ${pulse}
       - output.turn_off: opto_garage_lock
 
+  # Programming combo: Stop and Open shorted at the same time,
+  # the way a finger holds both buttons on the remote at once.
+  #
+  # Deliberately a primitive of its own rather than a call to
+  # send_garage_stop and send_garage_open. send_garage_stop is not
+  # a pure primitive - it also stops the travel timer and clears
+  # garage_dir - and pressing a programming button must not tell
+  # the device anything about where the door is.
+  #
+  # The two turn_on actions run in the same loop iteration, so the
+  # contacts close microseconds apart: closer to simultaneous than
+  # any hand on the original remote gets.
+  - id: send_garage_program
+    mode: single
+    then:
+      - output.turn_on: opto_garage_stop
+      - output.turn_on: opto_garage_open
+      - delay: ${pulse}
+      - output.turn_off: opto_garage_open
+      - output.turn_off: opto_garage_stop
+
   # mode: restart - a new command restarts the countdown.
   - id: garage_travel_timer
     mode: restart
@@ -235,7 +256,14 @@ button:
     on_press:
       - script.execute: send_garage_lock
 
-  # --- Gate ---------------------------------------------------
+  # Stop and Open at once. Used to put the drive into its
+  # programming mode; carries no logic of its own.
+  - platform: template
+    name: "Garage programming"
+    id: button_garage_program
+    icon: "mdi:cog-outline"
+    on_press:
+      - script.execute: send_garage_program
 
   # --- Diagnostics: bypass the direction logic entirely --------
   #  The escape hatch for when the assumed state and reality have
