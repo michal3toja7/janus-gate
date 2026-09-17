@@ -1,0 +1,41 @@
+<component name="ProjectRunConfigurationManager">
+  <!--
+    Compiles the diagnostic build without touching a device. The
+    artifact lands at:
+
+      .esphome/build/janus-gate/build/firmware.ota.bin
+
+    Note that path: the debug build deliberately keeps the
+    production device name, so both builds share one build
+    directory and overwrite each other's artifact. Upload the .bin
+    promptly, or rebuild before uploading, so you know which
+    firmware you are actually shipping to the device.
+
+    Useful when the board is already mounted and reachable over the
+    network: build here, upload through the device's own web panel,
+    sniff, then put production back the same way.
+  -->
+  <configuration default="false" name="ESPHome: DEBUG build OTA package" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="false">
+    <module name="janus-gate" />
+    <option name="ENV_FILES" value="" />
+    <option name="INTERPRETER_OPTIONS" value="" />
+    <option name="PARENT_ENVS" value="true" />
+    <envs>
+      <env name="PYTHONUNBUFFERED" value="1" />
+    </envs>
+    <option name="SDK_HOME" value="" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="IS_MODULE_SDK" value="true" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+    <option name="SCRIPT_NAME" value="esphome" />
+    <option name="PARAMETERS" value="compile janus-gate-debug.yaml" />
+    <option name="SHOW_COMMAND_LINE" value="false" />
+    <option name="EMULATE_TERMINAL" value="true" />
+    <option name="MODULE_MODE" value="true" />
+    <option name="REDIRECT_INPUT" value="false" />
+    <option name="INPUT_FILE" value="" />
+    <method v="2" />
+  </configuration>
+</component>

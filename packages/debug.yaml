@@ -1,0 +1,66 @@
+# =============================================================
+#  debug  -  radio sniffing aids, NEVER part of a production build
+# =============================================================
+#  Included only by janus-gate-debug.yaml. The production entry
+#  file does not reference this package at all, so none of these
+#  entities exist on a production flash.
+#
+#  Purpose: answer the question "is this remote transmitting
+#  anything at all?" The receiver override in the debug entry file
+#  drops the pulse filter and turns on raw frame dumping; what is
+#  here lets the radio be retuned without reflashing.
+#
+#  WHY RETUNING MATTERS: hearing nothing proves nothing unless the
+#  radio is listening where the remote actually talks. A remote
+#  specified as "433 MHz" is usually 433.92, but 433.42 is common
+#  enough that a silent result on one frequency is not a verdict.
+#  Sweep both before concluding a remote is dead.
+#
+#  cc1101.set_frequency drops the chip to IDLE, rewrites FREQ2/1/0
+#  and re-enters RX by itself, so receiving resumes after a retune
+#  with no further action.
+# =============================================================
+
+globals:
+  # Mirrors what the buttons below set. The component exposes no
+  # getter, so the panel would otherwise have no way to show which
+  # frequency is live - which is the first thing you want to know
+  # while sweeping.
+  - id: debug_rf_hz
+    type: int
+    restore_value: false
+    initial_value: '433920000'
+
+button:
+  - platform: template
+    name: "DEBUG tune 433.92 MHz"
+    id: button_debug_tune_43392
+    icon: "mdi:radio-tower"
+    on_press:
+      - cc1101.set_frequency:
+          id: radio
+          value: 433.92MHz
+      - lambda: 'id(debug_rf_hz) = 433920000;'
+      - logger.log: "DEBUG: radio retuned to 433.92 MHz"
+
+  - platform: template
+    name: "DEBUG tune 433.42 MHz"
+    id: button_debug_tune_43342
+    icon: "mdi:radio-tower"
+    on_press:
+      - cc1101.set_frequency:
+          id: radio
+          value: 433.42MHz
+      - lambda: 'id(debug_rf_hz) = 433420000;'
+      - logger.log: "DEBUG: radio retuned to 433.42 MHz"
+
+text_sensor:
+  - platform: template
+    name: "DEBUG radio frequency"
+    id: debug_radio_frequency
+    icon: "mdi:sine-wave"
+    update_interval: 2s
+    lambda: |-
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%.2f MHz", id(debug_rf_hz) / 1000000.0f);
+      return {std::string(buf)};

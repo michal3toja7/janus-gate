@@ -1,0 +1,90 @@
+# =============================================================
+#  janus-gate  -  DEBUG BUILD
+# =============================================================
+#  A diagnostic variant of the production firmware. It is the SAME
+#  device with the SAME packages; only the receiver is opened up
+#  and a few sniffing aids are added.
+#
+#  NOT FOR PRODUCTION. The pulse filter is dropped to 10us and raw
+#  frame dumping is on, so the log fills with received noise by
+#  design. Flash janus-gate.yaml again when finished.
+#
+#  WHAT IT IS FOR
+#  Answering "is this remote transmitting anything at all?" The
+#  garage remote reaches the drive through optocouplers, so its RF
+#  is never used by this project and was never characterised. When
+#  the garage stops responding, this build is how you tell a dead
+#  remote from a dead optocoupler.
+#
+#  BEFORE REACHING FOR IT, rule out the two documented failures
+#  that produce exactly this symptom and need no firmware at all:
+#    - PC817 jumpers left fitted hold a button down permanently and
+#      lock up the remote's encoder; every button then looks dead.
+#    - The remote's leftover battery tabs can short against each
+#      other once the enclosure is closed.
+#
+#  HOW TO USE
+#    1. Flash this build over USB.
+#    2. Watch the log. With the filter this low it is noisy - that
+#       is expected and is the point.
+#    3. Press a button on the suspect remote close to the antenna.
+#       A real frame appears as a long structured burst, clearly
+#       distinct from the short scattered noise around it.
+#    4. Heard nothing? Press "DEBUG tune 433.42 MHz" and repeat.
+#       Silence on one frequency is not a verdict.
+#    5. Flash janus-gate.yaml to go back.
+#
+#  The device name is deliberately unchanged, so this build targets
+#  the same janus-gate.local over OTA and Home Assistant does not
+#  gain a second device. friendly_name marks which one is running.
+# =============================================================
+
+substitutions:
+  device_name: "janus-gate"
+  pulse: "400ms"
+  travel_time: "45s"
+  rf_frequency: "433.92MHz"
+  rf_repeats: "8"
+  gate_travel_time: "45s"
+  learn_timeout: "60s"
+
+packages:
+  core:        !include packages/core.yaml
+  radio:       !include packages/radio.yaml
+  garage:      !include packages/garage.yaml
+  gate:        !include packages/gate.yaml
+  learning:    !include packages/learning.yaml
+  diagnostics: !include packages/diagnostics.yaml
+
+  # Debug-only. Absent from the production entry file.
+  debug:       !include packages/debug.yaml
+
+# Marks which firmware is live. The device name stays janus-gate so
+# OTA and mDNS keep working against the same host.
+esphome:
+  friendly_name: "Janus Gate (DEBUG)"
+
+# -------------------------------------------------------------
+#  RECEIVER OVERRIDE  -  the whole point of this build
+# -------------------------------------------------------------
+#  Merges onto rf_rx from learning.yaml, changing only these two
+#  keys. The two-frame confirmation in on_raw is untouched, so
+#  learning still works while sniffing.
+#
+#  filter: 10us instead of 100us. Production filters genuine noise
+#  spikes; here we want to see everything, including the spikes,
+#  because the question is whether ANY energy arrives at all.
+#
+#  dump: raw, never dump: all. "all" additionally runs the infrared
+#  decoders, and Pronto and Beo4 will happily "recognise" RF noise
+#  and bury the log in megabytes of hex.
+#
+#  filter_bandwidth and rx_attenuation are NOT overridden: radio.yaml
+#  already sets 200kHz and 0dB, which is the most open the front end
+#  gets. There is nothing to win there.
+# -------------------------------------------------------------
+
+remote_receiver:
+  id: rf_rx
+  dump: raw
+  filter: 10us
