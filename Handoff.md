@@ -37,9 +37,14 @@ Both paths are fully local. Neither Wi-Fi nor Home Assistant sits in the
 control chain — the physical toggle switches work with the network down, which
 is the entire point of the device.
 
-`PXL_20260916_151005395.jpg` shows the interior: DevKit on perfboard, the two
-PC817 modules, the CC1101 with its SMA antenna. `PXL_20260916_151105395.jpg`
-shows the finished panel — two ON-OFF-ON rockers labelled *Garaż* and *Brama*.
+`docs/img/enclosure-interior.jpg` shows the interior: DevKit on perfboard, the
+two PC817 modules, the CC1101 with its SMA antenna.
+`docs/img/front-panel.jpg` shows the finished panel — two ON-OFF-ON rockers
+labelled *Garaż* and *Brama*.
+
+For the public-facing overview see [README.md](README.md); this document is the
+maintainer's record and owns the complete trap list, the verification status
+and the outstanding work.
 
 ---
 
