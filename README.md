@@ -61,6 +61,14 @@ Left: the ESP32-S3 DevKitC-1 on perfboard. Centre: two PC817 two-channel
 optocoupler modules, four channels driving the garage remote's four buttons.
 Right: the CC1101 with its SMA antenna. Single USB-C supply for everything.
 
+### How it all connects
+
+![Wiring diagram](docs/img/wiring.svg)
+
+The two control paths share nothing but the board and its power. Garage wire
+colours in the diagram match the ones actually in the box. The tables below
+give the same information pin by pin.
+
 ### Bill of materials
 
 | Item | Notes |

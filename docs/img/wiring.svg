@@ -1,0 +1,186 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="760" viewBox="0 0 1000 760" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .bg    { fill: #fbfaf7; }
+    .card  { fill: #ffffff; stroke: #3b3b3b; stroke-width: 1.6; rx: 6; }
+    .hdr   { fill: #2f3640; }
+    .hdrtx { fill: #ffffff; font-size: 13px; font-weight: 600; }
+    .lbl   { fill: #1c1c1c; font-size: 12px; }
+    .pin   { fill: #1c1c1c; font-size: 11.5px; font-weight: 600; }
+    .note  { fill: #5a5a5a; font-size: 11px; }
+    .grp   { fill: none; stroke: #b9b3a6; stroke-width: 1.2; stroke-dasharray: 5 4; rx: 8; }
+    .grptx { fill: #6b6459; font-size: 11.5px; font-weight: 700; letter-spacing: .08em; }
+    .w     { fill: none; stroke-width: 2.2; }
+    .title { fill: #1c1c1c; font-size: 17px; font-weight: 700; }
+    .sub   { fill: #5a5a5a; font-size: 12px; }
+  </style>
+
+  <rect class="bg" x="0" y="0" width="1000" height="760"/>
+
+  <text class="title" x="34" y="36">janus-gate — wiring</text>
+  <text class="sub"   x="34" y="56">One USB-C supply. Two control paths that share nothing but the board.</text>
+
+  <!-- ============ ESP32 ============ -->
+  <rect class="card" x="34" y="86" width="216" height="612"/>
+  <rect class="hdr"  x="34" y="86" width="216" height="30" rx="6"/>
+  <rect class="hdr"  x="34" y="104" width="216" height="12"/>
+  <text class="hdrtx" x="46" y="106">ESP32-S3 DevKitC-1</text>
+  <text class="note"  x="46" y="134">WROOM-1 N16R8</text>
+
+  <!-- USB in -->
+  <path class="w" stroke="#3b3b3b" d="M 6 160 H 34"/>
+  <text class="note" x="6" y="152">USB-C</text>
+  <text class="pin" x="46" y="164">5V</text>
+
+  <!-- power pins -->
+  <text class="pin" x="46" y="200">3V3</text>
+  <text class="pin" x="46" y="224">GND</text>
+
+  <!-- garage pins -->
+  <text class="pin" x="46" y="286">GPIO 4</text>
+  <text class="pin" x="46" y="312">GPIO 5</text>
+  <text class="pin" x="46" y="338">GPIO 6</text>
+  <text class="pin" x="46" y="364">GPIO 7</text>
+
+  <!-- radio pins -->
+  <text class="pin" x="46" y="428">GPIO 8</text>
+  <text class="pin" x="46" y="452">GPIO 9</text>
+  <text class="pin" x="46" y="476">GPIO 10</text>
+  <text class="pin" x="46" y="500">GPIO 11</text>
+  <text class="pin" x="46" y="524">GPIO 12</text>
+  <text class="pin" x="46" y="548">GPIO 13</text>
+
+  <!-- switch pins -->
+  <text class="pin" x="46" y="612">GPIO 15</text>
+  <text class="pin" x="46" y="634">GPIO 16</text>
+  <text class="pin" x="46" y="660">GPIO 17</text>
+  <text class="pin" x="46" y="682">GPIO 18</text>
+
+  <!-- ============ POWER STAR ============ -->
+  <!-- 3V3 trunk then two separate branches -->
+  <path class="w" stroke="#d9342b" d="M 250 196 H 286"/>
+  <circle cx="286" cy="196" r="3.4" fill="#d9342b"/>
+  <path class="w" stroke="#d9342b" d="M 286 196 V 168 H 690"/>
+  <path class="w" stroke="#d9342b" d="M 286 196 V 470 H 560"/>
+
+  <path class="w" stroke="#3b3b3b" d="M 250 220 H 300"/>
+  <circle cx="300" cy="220" r="3.4" fill="#3b3b3b"/>
+  <path class="w" stroke="#3b3b3b" d="M 300 220 V 180 H 690"/>
+  <path class="w" stroke="#3b3b3b" d="M 300 220 V 486 H 560"/>
+
+  <text class="note" x="312" y="164" fill="#d9342b">3V3 — star, not daisy chain</text>
+  <text class="note" x="312" y="254">Each load gets its own branch from the 3V3 pin. The remote is an</text>
+  <text class="note" x="312" y="268">analogue transmitter and the radio draws current in spikes; chained</text>
+  <text class="note" x="312" y="282">on one run, each would modulate the other's supply.</text>
+
+  <!-- ============ GARAGE GROUP ============ -->
+  <rect class="grp" x="300" y="296" width="660" height="118"/>
+  <text class="grptx" x="314" y="313">GARAGE — OPTOCOUPLER PATH</text>
+
+  <!-- opto module boxes -->
+  <rect class="card" x="404" y="322" width="118" height="38"/>
+  <text class="lbl" x="414" y="339">Opto 1</text>
+  <text class="note" x="414" y="353">PC817 · ch 2 / ch 1</text>
+
+  <rect class="card" x="404" y="366" width="118" height="38"/>
+  <text class="lbl" x="414" y="383">Opto 2</text>
+  <text class="note" x="414" y="397">PC817 · ch 1 / ch 2</text>
+
+  <!-- wires GPIO4-7 -> optos, in real wire colours -->
+  <path class="w" stroke="#9aa0a6" d="M 250 282 H 340 V 332 H 404"/>
+  <path class="w" stroke="#c9ccd1" d="M 250 308 H 352 V 348 H 404"/>
+  <path class="w" stroke="#f0c020" d="M 250 334 H 364 V 376 H 404"/>
+  <path class="w" stroke="#f08a24" d="M 250 360 H 376 V 392 H 404"/>
+
+  <text class="note" x="256" y="278">grey</text>
+  <text class="note" x="256" y="304">white</text>
+  <text class="note" x="256" y="330">yellow</text>
+  <text class="note" x="256" y="356">orange</text>
+
+  <!-- remote -->
+  <rect class="card" x="640" y="316" width="150" height="92"/>
+  <text class="lbl"  x="652" y="334">Garage remote</text>
+  <text class="note" x="652" y="350">3 V, battery removed</text>
+  <text class="note" x="652" y="366">Stop · Open</text>
+  <text class="note" x="652" y="380">Close · Lock</text>
+  <text class="note" x="652" y="398">rolling code — not cloned</text>
+
+  <path class="w" stroke="#3b3b3b" d="M 522 341 H 640"/>
+  <path class="w" stroke="#3b3b3b" d="M 522 385 H 600 V 341"/>
+  <text class="note" x="530" y="334">transistor side shorts the button pads</text>
+
+  <text class="note" x="806" y="336">No ground on the</text>
+  <text class="note" x="806" y="350">transistor side — it</text>
+  <text class="note" x="806" y="364">just shorts two</text>
+  <text class="note" x="806" y="378">contacts.</text>
+
+  <!-- ============ RADIO GROUP ============ -->
+  <rect class="grp" x="300" y="426" width="660" height="150"/>
+  <text class="grptx" x="314" y="443">GATE — CC1101 RADIO</text>
+
+  <rect class="card" x="560" y="450" width="190" height="112"/>
+  <text class="lbl"  x="572" y="468">CC1101</text>
+  <text class="note" x="572" y="483">Ebyte E07-M1101D-SMA</text>
+  <text class="note" x="572" y="505">pin 3  GDO0   transmit</text>
+  <text class="note" x="572" y="519">pin 8  GDO2   receive</text>
+  <text class="note" x="572" y="533">pin 4  CSN</text>
+  <text class="note" x="572" y="547">pins 5/6/7  SCK/MOSI/MISO</text>
+
+  <!-- antenna -->
+  <path class="w" stroke="#3b3b3b" d="M 750 470 H 780"/>
+  <path class="w" stroke="#3b3b3b" d="M 780 470 V 446"/>
+  <path class="w" stroke="#3b3b3b" d="M 772 452 L 780 444 L 788 452"/>
+  <text class="note" x="764" y="438">SMA</text>
+
+  <!-- SPI + data wires -->
+  <path class="w" stroke="#2f7d32" d="M 250 424 H 420 V 516 H 560"/>
+  <path class="w" stroke="#c2185b" d="M 250 448 H 432 V 502 H 560"/>
+  <path class="w" stroke="#5b6b8c" d="M 250 472 H 444 V 530 H 560"/>
+  <path class="w" stroke="#5b6b8c" d="M 250 496 H 456 V 540 H 560"/>
+  <path class="w" stroke="#5b6b8c" d="M 250 520 H 468 V 550 H 560"/>
+  <path class="w" stroke="#5b6b8c" d="M 250 544 H 480 V 560 H 560"/>
+
+  <text class="note" x="256" y="420" fill="#2f7d32">GDO2 · RX</text>
+  <text class="note" x="256" y="444" fill="#c2185b">GDO0 · TX</text>
+  <text class="note" x="256" y="468">CSN</text>
+  <text class="note" x="256" y="492">MOSI</text>
+  <text class="note" x="256" y="516">SCK</text>
+  <text class="note" x="256" y="540">MISO</text>
+
+  <text class="note" x="790" y="500">Pins 7 and 8 are swapped</text>
+  <text class="note" x="790" y="514">versus generic CC1101</text>
+  <text class="note" x="790" y="528">breakouts. Pin 1 is GND and</text>
+  <text class="note" x="790" y="542">rings out to the SMA shell.</text>
+
+  <!-- ============ SWITCHES GROUP ============ -->
+  <rect class="grp" x="300" y="588" width="660" height="122"/>
+  <text class="grptx" x="314" y="605">PHYSICAL SWITCHES — WORK WITH THE NETWORK DOWN</text>
+
+  <rect class="card" x="404" y="616" width="150" height="76"/>
+  <text class="lbl"  x="416" y="634">Garaż</text>
+  <text class="note" x="416" y="650">ON-OFF-ON, DPDT</text>
+  <text class="note" x="416" y="666">up → open</text>
+  <text class="note" x="416" y="680">down → close</text>
+
+  <rect class="card" x="600" y="616" width="150" height="76"/>
+  <text class="lbl"  x="612" y="634">Brama</text>
+  <text class="note" x="612" y="650">ON-OFF-ON, DPDT</text>
+  <text class="note" x="612" y="666">up → open</text>
+  <text class="note" x="612" y="680">down → close</text>
+
+  <path class="w" stroke="#5b6b8c" d="M 250 608 H 340 V 640 H 404"/>
+  <path class="w" stroke="#5b6b8c" d="M 250 630 H 352 V 660 H 404"/>
+  <path class="w" stroke="#5b6b8c" d="M 250 656 H 364 V 640 H 600"/>
+  <path class="w" stroke="#5b6b8c" d="M 250 678 H 376 V 668 H 600"/>
+
+  <path class="w" stroke="#3b3b3b" d="M 554 676 H 576 V 700 H 300 V 220"/>
+  <path class="w" stroke="#3b3b3b" d="M 750 676 H 770 V 700 H 576"/>
+  <text class="note" x="596" y="700">common → GND · internal pullups, no external resistors</text>
+
+  <text class="note" x="790" y="634">A lever pivots: pushing it</text>
+  <text class="note" x="790" y="648">UP closes the contact on the</text>
+  <text class="note" x="790" y="662">LOWER side of the body. Fixed</text>
+  <text class="note" x="790" y="676">in the wiring, not the config.</text>
+
+  <text class="note" x="34" y="726">Keep clear: 26–32 flash · 33–37 octal PSRAM · 0/3/45/46 strapping · 19/20 USB-JTAG · 43/44 UART0 · 38 or 48 RGB LED · 14/21/42 reserved for RFID</text>
+  <text class="note" x="34" y="744">100 nF + 47 µF across VCC/GND at the remote and again at the radio, as close to each header as possible.</text>
+</svg>
