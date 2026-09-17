@@ -39,6 +39,28 @@ globals:
 #  send_gate_* are the raw primitives - they key the radio and
 #  nothing else. The anti-reverse logic lives in cmd_gate_*,
 #  mirroring the garage.
+#
+#  THE begin_tx / begin_rx PAIR IS NOT OPTIONAL.
+#
+#  The cc1101 component knows nothing about remote_transmitter -
+#  there is no coupling between them at all. remote_transmitter
+#  keys GPIO9 through the RMT peripheral, but the radio's own
+#  state machine is moved only by explicit actions. begin_tx() has
+#  exactly one caller in the whole component: the cc1101.begin_tx
+#  action below.
+#
+#  Without it the chip stays parked in RX, where configure() left
+#  it, and the RMT dutifully keys a pin into a radio that is
+#  listening rather than transmitting. Nothing reaches the air,
+#  no error is logged, and transmit_raw reports success. That
+#  silent failure is exactly why the transmit path went unproven
+#  for so long.
+#
+#  begin_rx afterwards is equally required: without it the radio
+#  stays in TX and learning stops working after the first send.
+#
+#  This depends on remote_transmitter setting non_blocking: false
+#  in radio.yaml. See the comment there.
 # -------------------------------------------------------------
 
 script:
@@ -51,6 +73,7 @@ script:
           then:
             - logger.log: "Gate OPEN not learned yet - nothing sent"
           else:
+            - cc1101.begin_tx: radio
             - remote_transmitter.transmit_raw:
                 code: !lambda |-
                   return std::vector<int32_t>(
@@ -59,6 +82,7 @@ script:
                 repeat:
                   times: ${rf_repeats}
                   wait_time: 10ms
+            - cc1101.begin_rx: radio
 
   - id: send_gate_close
     mode: single
@@ -69,6 +93,7 @@ script:
           then:
             - logger.log: "Gate CLOSE not learned yet - nothing sent"
           else:
+            - cc1101.begin_tx: radio
             - remote_transmitter.transmit_raw:
                 code: !lambda |-
                   return std::vector<int32_t>(
@@ -77,6 +102,7 @@ script:
                 repeat:
                   times: ${rf_repeats}
                   wait_time: 10ms
+            - cc1101.begin_rx: radio
 
   - id: send_gate_stop
     mode: single
@@ -89,6 +115,7 @@ script:
           else:
             - script.stop: gate_travel_timer
             - lambda: 'id(gate_dir) = 0;'
+            - cc1101.begin_tx: radio
             - remote_transmitter.transmit_raw:
                 code: !lambda |-
                   return std::vector<int32_t>(
@@ -97,6 +124,7 @@ script:
                 repeat:
                   times: ${rf_repeats}
                   wait_time: 10ms
+            - cc1101.begin_rx: radio
 
   # ---------------------------------------------------------
   #  GATE  -  direction logic

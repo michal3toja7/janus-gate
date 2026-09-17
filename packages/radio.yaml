@@ -86,3 +86,19 @@ remote_transmitter:
   # OOK has no sub-carrier - the RF carrier is simply keyed on
   # and off, so the data line must be driven solid, not chopped.
   carrier_duty_percent: 100%
+  # Blocking transmission, deliberately.
+  #
+  # ESPHome changed this default to true in 2025.11.0. With
+  # non_blocking: true, transmit_raw queues the frame and returns
+  # immediately - so the cc1101.begin_rx that follows it in
+  # send_gate_* would pull the radio out of TX partway through the
+  # frame and cut the transmission in half.
+  #
+  # Blocking keeps the sequence honest: enter TX, send the whole
+  # burst, return to RX. The cost is a few hundred milliseconds of
+  # blocked loop per press, which on this device is unremarkable -
+  # the garage optocouplers already block for 400ms.
+  #
+  # If this is ever set back to true, move the begin_rx in
+  # gate.yaml into an on_complete: trigger here instead.
+  non_blocking: false
