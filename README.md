@@ -338,5 +338,8 @@ a moving door and something underneath it.
 
 ## License
 
-Not yet chosen. Until one is added, default copyright applies — ask before
-reusing.
+[MIT](LICENSE). Use it, change it, sell it — just keep the copyright notice.
+
+Note what that covers and what it does not: the licence grants rights to the
+software. It does not vouch for the hardware, and the warranty disclaimer is
+not a formality on a project that drives motors. Read the warning above.
